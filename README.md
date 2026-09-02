@@ -503,17 +503,3 @@ Build the application:
 npm run build
 ```
 
-## Security Notes
-
-This project is intended for the hiring-assignment/demo environment.
-
-Never commit:
-
-* `.env`
-* `.env.local`
-* OAuth secrets
-* SMTP credentials
-* Database passwords
-* Redis credentials
-
-The backend API currently relies on local trusted access rather than coupling every `/api/*` request to the Google dashboard session. Do not expose the backend publicly without adding appropriate API authentication.
