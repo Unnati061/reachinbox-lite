@@ -12,6 +12,12 @@ build/
 out/
 next-env.d.ts
 
+# Agent instruction files that `next dev` regenerates on every run
+# (node_modules/next/dist/server/lib/generate-agent-files.js). Ignored rather
+# than committed so a dev server does not dirty the tree.
+frontend/AGENTS.md
+frontend/CLAUDE.md
+
 # Prisma — the client is generated into the source tree, so it is not committed.
 backend/src/db/generated/
 
