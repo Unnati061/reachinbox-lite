@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Next.js
+.next/
+out/
+next-env.d.ts
+
+# Prisma — the client is generated into the source tree, so it is not committed.
+backend/src/db/generated/
+
+# Environment files — real values are local only. Commit the .example files instead.
+.env
+.env.*
+!.env.example
+
+# Test / coverage output
+coverage/
+.vitest/
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Editors & OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

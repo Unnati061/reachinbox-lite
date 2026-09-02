@@ -1,0 +1,129 @@
+@import 'tailwindcss';
+
+/*
+ * Tailwind v4 is CSS-first: there is no tailwind.config.js. Design tokens are
+ * declared here in @theme and become utilities automatically.
+ *
+ * The colour tokens are *semantic* (`surface`, `ink`, `line`) rather than
+ * literal (`slate-50`, `gray-900`). Components then read `bg-surface text-ink`
+ * once instead of repeating a `light:`/`dark:` pair at every call site, and a
+ * theme change is a variable swap in one place.
+ *
+ * `@theme inline` matters: it inlines `var(--surface)` into each utility, so the
+ * utility resolves against whichever :root block is currently in effect. With a
+ * non-inline @theme the value would be captured once and dark mode would not
+ * follow.
+ */
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-ink: var(--danger-ink);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+}
+
+@theme {
+  /*
+   * System font stack instead of next/font. next/font fetches Google Fonts at
+   * build time, which makes `next build` fail without network access — not a
+   * trade worth making for a scheduler UI.
+   */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans', sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+:root {
+  --canvas: #ffffff;
+  --surface: #f8fafc;
+  --surface-muted: #f1f5f9;
+  --line: #e2e8f0;
+  --ink: #0f172a;
+  --ink-muted: #64748b;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-ink: #ffffff;
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-ink: #ffffff;
+  --success: #15803d;
+  --warning: #b45309;
+}
+
+/*
+ * Dark mode follows the OS. There is no theme toggle yet; when one is added it
+ * should set `data-theme` on <html> and this block gains a matching selector
+ * rather than being replaced.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #080b14;
+    --surface: #0f172a;
+    --surface-muted: #1e2939;
+    --line: #1e2939;
+    --ink: #f1f5f9;
+    --ink-muted: #94a3b8;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --accent-ink: #ffffff;
+    --danger: #ef4444;
+    --danger-hover: #f87171;
+    --danger-ink: #ffffff;
+    --success: #4ade80;
+    --warning: #fbbf24;
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible keyboard focus everywhere, including inside the <dialog> top layer. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /*
+   * Modals use the native <dialog> element. showModal() centres it via the
+   * UA stylesheet's `margin: auto`, so keep that and only style the backdrop.
+   */
+  dialog::backdrop {
+    background-color: rgb(2 6 23 / 0.6);
+  }
+
+  /* Stop the page scrolling behind an open modal without a JS scroll-lock. */
+  body:has(dialog[open]) {
+    overflow: hidden;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

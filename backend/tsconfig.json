@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    /* Node 22 LTS on the host; ESM everywhere ("type": "module" in package.json).
+       NodeNext means relative imports carry an explicit .js extension — that is
+       what Node actually resolves at runtime, so dev (tsx) and prod (node dist)
+       behave identically. */
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "resolveJsonModule": true,
+
+    /* Typecheck-only. Emit is configured in tsconfig.build.json. */
+    "noEmit": true,
+    "sourceMap": true,
+    "declaration": false,
+
+    /* Strictness. `strict` is the floor, not the ceiling. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+
+    /* Module hygiene: no emit-time magic, `import type` must be explicit. */
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "*.ts", "*.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

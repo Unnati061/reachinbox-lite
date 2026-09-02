@@ -1,0 +1,47 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+
+    /* Set by `next build` and mandatory — Next 16 uses React's automatic JSX
+       runtime, so "preserve" is rejected. Do not change it back. */
+    "jsx": "react-jsx",
+
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "incremental": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+
+    /* Strictness. exactOptionalPropertyTypes is deliberately off here — it
+       fights React's own prop types more than it catches real bugs. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  /* .next/**\/types holds generated route types, so it is included even though
+     the rest of .next is build output. Only node_modules is excluded — that is
+     Next's own convention. */
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}

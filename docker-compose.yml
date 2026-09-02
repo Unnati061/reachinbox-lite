@@ -1,0 +1,58 @@
+# ReachInbox-lite — local development datastores.
+#
+#   npm run db:up      start both services in the background
+#   npm run db:down    stop them (data survives — volumes are named)
+#   npm run db:reset   stop and DESTROY the volumes, then start fresh
+#
+# Values come from the repo-root .env (Compose loads it automatically).
+# The `:?` syntax makes Compose fail with a named variable instead of silently
+# booting Postgres with an empty password — same fail-fast rule as backend config.
+#
+# Only the datastores live here. The API and web app run on the host so that
+# tsx watch / Next.js Fast Refresh stay instant.
+
+name: reachinbox-lite
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: reachinbox-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in the repo-root .env (copy .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the repo-root .env (copy .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in the repo-root .env (copy .env.example)}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # $$ escapes Compose interpolation so the container's shell expands it.
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:8-alpine
+    container_name: reachinbox-redis
+    restart: unless-stopped
+    # AOF persistence: a scheduled send sitting in a BullMQ delayed set must
+    # survive a container restart, otherwise queued emails are silently dropped.
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'everysec']
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+    name: reachinbox-pgdata
+  redisdata:
+    name: reachinbox-redisdata

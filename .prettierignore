@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.next/
+coverage/
+package-lock.json
+backend/src/db/generated/
+backend/prisma/migrations/

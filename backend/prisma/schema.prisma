@@ -1,0 +1,31 @@
+// ReachInbox-lite — Prisma schema.
+//
+// There are deliberately no domain models yet. The scheduler's data model
+// (accounts, campaigns/sequences, scheduled sends, delivery attempts) is the
+// next phase and should reflect agreed requirements rather than a guess made
+// during scaffolding. datasource + generator are real, so `prisma generate`
+// and `prisma migrate dev` work today and the first migration will be the
+// real data model rather than a correction of an invented one.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/db/generated"
+
+  // Node on the host; ESM to match the backend's "type": "module".
+  runtime      = "nodejs"
+  moduleFormat = "esm"
+
+  // Emit .ts, but write ".js" in the generated import statements — the same
+  // NodeNext convention the hand-written source uses, so `tsc` output runs
+  // under plain `node dist/` with no rewriting step.
+  generatedFileExtension = "ts"
+  importFileExtension    = "js"
+}
+
+// The connection URL is NOT declared here. Prisma 7 removed `url` from the
+// datasource block: Migrate reads it from prisma.config.ts, and the runtime
+// client gets it from the driver adapter in src/db/client.ts. One source of
+// truth per consumer, and no secret in a committed schema file.
+datasource db {
+  provider = "postgresql"
+}

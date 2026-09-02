@@ -1,0 +1,13 @@
+{
+  /* Emit config for `npm run build`. Tests and root-level config files are
+     excluded so dist/ mirrors src/ exactly (dist/index.js, dist/workers/index.js). */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "removeComments": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "tests", "**/*.test.ts"]
+}
