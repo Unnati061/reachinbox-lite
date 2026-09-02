@@ -114,7 +114,15 @@ export async function request<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const { body, headers, query, signal, timeoutMs = DEFAULT_TIMEOUT_MS, cache, acceptStatuses } = options;
+  const {
+    body,
+    headers,
+    query,
+    signal,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    cache,
+    acceptStatuses,
+  } = options;
   const url = buildUrl(path, query);
 
   const timeout = AbortSignal.timeout(timeoutMs);
@@ -169,11 +177,15 @@ export async function request<T>(
 }
 
 /**
- * Endpoint map. Health sits outside `/api/v1` deliberately (see backend
- * routes/index.ts) — probes should not have to follow API versioning. Domain
- * calls added later belong under `API_PREFIX`.
+ * Endpoint map. Health sits outside `/api` deliberately (see backend
+ * routes/index.ts) — probes should not have to know anything about the API
+ * surface. Domain calls belong under `API_BASE`.
+ *
+ * There is no version segment: the backend dropped its unmounted `/api/v1`
+ * constant in favour of the `/api` the routes are actually served from. A
+ * version in the client that the server does not answer on is worse than none.
  */
-export const API_PREFIX = '/api/v1';
+export const API_BASE = '/api';
 
 export const api = {
   health: (options?: RequestOptions) => request<HealthResponse>('GET', '/health', options),

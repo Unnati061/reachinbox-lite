@@ -12,9 +12,12 @@ import { createRouter } from './routes/index.js';
  * Builds the Express app without binding a port, so tests can drive it in
  * process and `index.ts` owns the listening/shutdown lifecycle.
  *
- * NOTE: there is no authentication layer yet — every route mounted here is
- * publicly reachable. Today that is only /health, which is intentional. Auth
- * middleware must land before the first route that touches user data.
+ * SECURITY: there is still no authentication layer, and as of this phase that
+ * is no longer harmless. `/api/emails/*` lets any caller who can reach the port
+ * send mail as any registered sender, and read every recipient address, subject
+ * and error in the database. It is bound to localhost in development and CORS
+ * limits browsers, but CORS does not limit curl. Auth must land before this is
+ * exposed to anything but a local dev machine.
  */
 export function createApp(): Express {
   const app = express();

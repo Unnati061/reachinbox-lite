@@ -10,11 +10,20 @@ export const QUEUE_NAMES = {
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 
 /**
+ * Job name inside the dispatch queue. BullMQ uses it only for filtering and
+ * metrics — routing is by queue — but a named job makes `queue.getJobs()` and
+ * the Bull Board UI readable.
+ */
+export const EMAIL_DISPATCH_JOB_NAME = 'send-email';
+
+/**
  * Payload for a single scheduled send.
  *
- * Provisional: it carries an id rather than the message itself so the worker
- * reads current state at send time (a send cancelled after enqueue must not go
- * out). The field name settles with the data model.
+ * It carries an id rather than the message itself so the worker reads current
+ * state at send time: a send cancelled after enqueue must not go out, and a
+ * subject edited after enqueue should not send the stale copy. The job id is
+ * set to this same id when enqueueing (see email.service.ts), which makes
+ * re-enqueueing a batch idempotent.
  */
 export interface EmailDispatchJob {
   readonly scheduledEmailId: string;

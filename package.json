@@ -31,7 +31,9 @@
     "db:logs": "docker compose logs -f",
     "prisma:generate": "npm run prisma:generate --workspace backend",
     "prisma:migrate": "npm run prisma:migrate --workspace backend",
-    "prisma:studio": "npm run prisma:studio --workspace backend"
+    "prisma:deploy": "npm run prisma:deploy --workspace backend",
+    "prisma:studio": "npm run prisma:studio --workspace backend",
+    "sender:create": "npm run sender:create --workspace backend --"
   },
   "devDependencies": {
     "concurrently": "10.0.5",

@@ -1,11 +1,9 @@
 // ReachInbox-lite — Prisma schema.
 //
-// There are deliberately no domain models yet. The scheduler's data model
-// (accounts, campaigns/sequences, scheduled sends, delivery attempts) is the
-// next phase and should reflect agreed requirements rather than a guess made
-// during scaffolding. datasource + generator are real, so `prisma generate`
-// and `prisma migrate dev` work today and the first migration will be the
-// real data model rather than a correction of an invented one.
+// Naming: models are PascalCase (TypeScript side), tables and columns are
+// snake_case via @map/@@map (Postgres side). Every timestamp is timestamptz —
+// a scheduler that stores naive local times is a scheduler that sends at the
+// wrong hour the moment a client or a server changes timezone.
 
 generator client {
   provider = "prisma-client"
@@ -28,4 +26,98 @@ generator client {
 // truth per consumer, and no secret in a committed schema file.
 datasource db {
   provider = "postgresql"
+}
+
+/// Lifecycle of one scheduled send. Lowercase to match the JSON the API emits,
+/// so no mapping layer sits between the database and the wire.
+enum EmailStatus {
+  pending
+  processing
+  sent
+  failed
+
+  @@map("email_status")
+}
+
+/// A From identity. Holds no SMTP secret: `smtpCredentialRef` names a credential
+/// set resolved outside the database (today the SMTP_* env vars). See
+/// DECISIONS.md — putting passwords in Postgres turns the database into a
+/// secret store that needs encryption and rotation for no benefit.
+model Sender {
+  id                String   @id @default(uuid(4)) @db.Uuid
+  email             String   @unique
+  displayName       String   @map("display_name")
+  smtpCredentialRef String   @default("default") @map("smtp_credential_ref")
+  /// Soft disable. Senders accumulate sent history, so deleting one is not an
+  /// option; scheduling checks this flag instead.
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  batches         ScheduleBatch[]
+  scheduledEmails ScheduledEmail[]
+
+  @@map("senders")
+}
+
+/// One POST /api/emails/schedule request.
+///
+/// Exists so the timeline is explainable after the fact: given only per-email
+/// `scheduled_at` values you cannot tell whether a 3-minute gap came from the
+/// requested delay or from an hourly cap. `effectiveStepMs` records what the
+/// planner actually used.
+model ScheduleBatch {
+  id                   String   @id @default(uuid(4)) @db.Uuid
+  senderId             String   @map("sender_id") @db.Uuid
+  startAt              DateTime @map("start_at") @db.Timestamptz(3)
+  delayBetweenEmailsMs Int      @map("delay_between_emails_ms")
+  hourlyLimit          Int?     @map("hourly_limit")
+  /// max(delayBetweenEmailsMs, ceil(3_600_000 / hourlyLimit)) — the spacing
+  /// actually applied between consecutive sends.
+  effectiveStepMs      Int      @map("effective_step_ms")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  sender Sender           @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  emails ScheduledEmail[]
+
+  @@index([senderId, createdAt])
+  @@map("schedule_batches")
+}
+
+/// One email to one recipient at one instant.
+///
+/// Subject and body are stored per row rather than on the batch: this table is
+/// the delivery record, and it must keep what was actually sent even if the
+/// batch is later edited.
+model ScheduledEmail {
+  id             String      @id @default(uuid(4)) @db.Uuid
+  batchId        String?     @map("batch_id") @db.Uuid
+  senderId       String      @map("sender_id") @db.Uuid
+  /// Stored lowercased — the API normalises before writing so dedupe and
+  /// per-recipient lookups do not need a case-insensitive index.
+  recipientEmail String      @map("recipient_email")
+  subject        String
+  body           String
+  scheduledAt    DateTime    @map("scheduled_at") @db.Timestamptz(3)
+  status         EmailStatus @default(pending)
+  /// The BullMQ job id, which equals `id` by construction (see
+  /// scheduling.service.ts — using the row id as the job id makes enqueueing
+  /// idempotent). NULL therefore means "row committed but not yet enqueued",
+  /// which is the state a reconciliation sweep looks for.
+  bullmqJobId    String?     @unique @map("bullmq_job_id")
+  error          String?
+  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sentAt         DateTime?   @map("sent_at") @db.Timestamptz(3)
+
+  sender Sender         @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  batch  ScheduleBatch? @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  /// Both list endpoints filter on a status set and order by scheduled_at.
+  @@index([status, scheduledAt])
+  /// Counting a sender's sends inside an hour window, for the rate limit that
+  /// is derived from this table rather than from a counter (see DECISIONS.md).
+  @@index([senderId, scheduledAt])
+  @@index([batchId])
+  @@map("scheduled_emails")
 }
