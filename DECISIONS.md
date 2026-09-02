@@ -861,3 +861,131 @@ Stated in full so the "verified by execution" claim at the top can be audited:
   until the worker exists.
 - **`prisma generate` output is gitignored**, so a fresh clone must run `npm install`
   (the `postinstall` hook) before `tsc` can resolve `src/db/generated/client.js`.
+
+## 2026-09-02 — Phase 2.1: mid-project pivot from local Docker to hosted datastores
+
+Every earlier entry that touched infrastructure carried the same caveat: Docker would
+not start on this machine, so nothing had run against a real Postgres or Redis. That
+is now resolved — not by fixing Docker.
+
+### Why the pivot: virtualization could not be enabled
+
+Docker Desktop's Linux engine needs hardware virtualization (WSL2 / Hyper-V). The BIOS
+supports it, but it could not be enabled at the OS level — a driver/policy issue, not
+something solvable in reasonable time here. `docker info` reached the named pipe but
+the Linux engine never finished booting (`500` from `dockerDesktopLinuxEngine`).
+
+**Chose** hosted managed datastores **over** continuing to fight the local setup:
+**Neon** for Postgres, **Upstash** for Redis, both free tier. Blocking every data-path
+task until the host is reinstalled was the worse option. Both are swappable — nothing
+in `src/` knows it is talking to Neon or Upstash rather than localhost; only the two
+URLs in `backend/.env` change. This supersedes the Phase 1 "Compose runs datastores
+only / unverified" note and the Phase 2 "migration generated offline and has never been
+applied" note; both were written when Docker was still the plan.
+
+### Pooled vs direct: two Postgres URLs, on purpose
+
+Neon fronts Postgres with PgBouncer in **transaction** pooling mode and exposes two
+endpoints that differ only by a `-pooler` segment in the host:
+
+- **pooled** (`...-pooler...`) → `DATABASE_URL`, used by the app at runtime.
+- **direct** (no `-pooler`) → `DIRECT_URL`, used by Prisma Migrate.
+
+They cannot be one URL. Migrate takes a **session-level advisory lock** to serialize
+migrations; transaction pooling hands each statement whatever backend is free, so the
+`unlock` can land on a different session than the `lock` and the lock is meaningless (in
+practice migrate hangs or errors). Migrations need a session pinned end to end — the
+direct endpoint. Runtime wants the opposite: a connection-capped Postgres does far
+better with PgBouncer multiplexing than one raw connection per app instance.
+
+Wiring:
+
+- `prisma.config.ts` datasource url = `process.env.DIRECT_URL ?? process.env.DATABASE_URL ?? ''`,
+  so Migrate/Studio prefer the direct endpoint and fall back to `DATABASE_URL` on a
+  non-pooled Postgres that needs no split.
+- `src/db/client.ts` still uses `config.db.url` = `DATABASE_URL` = pooled, unchanged.
+- `DIRECT_URL` is deliberately **not** in `env.ts`'s zod schema. The app never opens the
+  direct connection, and the schema is non-strict (`z.object` strips unknown keys), so a
+  present-but-unvalidated `DIRECT_URL` is harmless. Only `prisma.config.ts` reads it, via
+  `dotenv/config`.
+
+`DIRECT_URL` was **derived**, not invented: the given pooled URL with `-pooler` removed
+from the host — Neon's documented convention, same credentials. Per the standing "ask,
+don't invent" rule this is not a fabricated secret; it is the same secret against the
+sibling endpoint.
+
+### Redis over TLS: `rediss://`, not `redis://`
+
+Upstash requires TLS, and ioredis decides TLS from the URL **scheme**, so the URL is
+stored as `rediss://` (double `s`). Upstash's console shows a `redis-cli --tls -u
+redis://...` form; the `--tls` there is the CLI's separate switch, and its `redis://`
+maps to ioredis's `rediss://`. No explicit `tls: {}` option is needed in
+`src/db/redis.ts` — the scheme carries it. `REDIS_URL`'s regex in `env.ts` already
+accepted `rediss?://`, so no code changed for this.
+
+### docker-compose kept as an optional fallback, not deleted
+
+**Chose** keeping `docker-compose.yml` **over** deleting it, re-banner-marked as an
+explicitly optional local-Docker path. Someone who _can_ run Docker may prefer local
+datastores to signing up for hosted ones, and the file already encodes real decisions
+(AOF persistence, healthchecks, named volumes, fail-fast on a missing password).
+Deleting it would throw that away to save a paragraph. The header now states plainly
+that hosted is the default, that this file is a fallback, and that on a local Postgres
+`DIRECT_URL` should equal `DATABASE_URL`. The root `.env` / `.env.example` it consumes
+are reframed the same way, and the `db:*` npm scripts stay, labelled optional in the
+README.
+
+### The `sslmode=require` deprecation warning is expected, and left alone
+
+The first real pooled query printed a `pg-connection-string` warning: `sslmode` values
+`prefer`/`require`/`verify-ca` are currently treated as aliases for `verify-full`, and a
+future major will switch them to weaker libpq semantics. Today that means the given
+`sslmode=require` is enforced as `verify-full` — **stronger** than asked, not weaker.
+
+**Chose** leaving the URL as Neon's canonical string **over** rewriting it to
+`sslmode=verify-full` or `uselibpqcompat=true`. It is what Neon hands out and it works;
+the warning is forward-looking, not a current defect; and editing a user-provided
+connection string to silence a deprecation is the kind of "helpful" change that breaks
+silently on the next `pg` bump. Revisit when `pg` 9 / `pg-connection-string` 3 land.
+
+### A caveat carried forward to the worker phase: Upstash + BullMQ
+
+Recorded now so it is not rediscovered later. BullMQ needs Redis to **not** evict keys
+under memory pressure (an evicted job or lock is a lost or double-sent email) and needs
+`maxRetriesPerRequest: null` on the blocking connection — the latter is already set for
+the `queue` role in `src/db/redis.ts`. Upstash's free tier has an eviction policy and
+per-command limits that a warm-up blast of 500 delayed jobs could bump into. **Verify at
+the start of the worker phase:** the database's `maxmemory-policy` (want `noeviction`),
+and that BullMQ's blocking polling does not burn the free-tier command budget. If either
+bites, the fallback is a dedicated Redis — again just a URL swap.
+
+### Verified by execution
+
+Not "should work" — run, on 2026-09-02, from `backend/`:
+
+- `prisma migrate status` against `DIRECT_URL` → connected to Neon `neondb` schema
+  `public`, reported the one migration pending.
+- `prisma migrate deploy` → applied `20260902105926_initial_schema`; "All migrations
+  have been successfully applied."
+- `prisma migrate status` again → "Database schema is up to date!"
+- A throwaway `tsx` script importing the **app's** `src/db/client.ts` (pooled
+  `DATABASE_URL`, PrismaPg/node-postgres) ran `sender.count()` / `scheduleBatch.count()`
+  / `scheduledEmail.count()` — all `0`, i.e. the tables exist and are empty — and
+  `select now()`. First time the app's own runtime path has touched a real database.
+- A throwaway `tsx` script importing `src/db/redis.ts` ran `PING` → `PONG` and `ECHO`
+  round-trip, over TLS, against Upstash.
+
+Both scripts were deleted after running — connectivity probes, not fixtures. The
+migration checksum now lives in Neon's `_prisma_migrations`.
+
+**Still unverified** (unchanged from Phase 2): no job has actually been enqueued to
+Upstash or processed — `addBulk` is still exercised only through mocks, and the worker
+still throws `NotImplementedError`. Connectivity is proven; the queue's real behaviour
+with 500 delayed jobs is not.
+
+### Secrets handling
+
+The real Neon and Upstash credentials the pivot introduced live only in gitignored
+`backend/.env`. `.env.example` carries placeholders (`USER:PASSWORD@ep-xxxx-pooler...`).
+`git check-ignore` was confirmed to cover `backend/.env` before committing. No real
+secret is in any tracked file.

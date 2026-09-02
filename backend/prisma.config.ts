@@ -13,6 +13,12 @@ export default defineConfig({
     // variable, which would break `prisma generate` on a fresh clone or in CI
     // where no database exists yet. Commands that actually need a connection
     // (migrate, studio) fail with Prisma's own error instead.
-    url: process.env.DATABASE_URL ?? '',
+    //
+    // DIRECT_URL first: the app runs against Neon's pooled (PgBouncer) endpoint,
+    // but Migrate takes a session-level advisory lock that transaction pooling
+    // does not preserve, so it must use the unpooled endpoint. DIRECT_URL holds
+    // it; DATABASE_URL is the fallback for a local/non-pooled Postgres that needs
+    // no split.
+    url: process.env.DIRECT_URL ?? process.env.DATABASE_URL ?? '',
   },
 });

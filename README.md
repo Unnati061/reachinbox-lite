@@ -4,33 +4,35 @@ Schedule email campaigns and watch them send.
 
 > **Status: data model and API skeleton (phase 2).** The schema, the scheduling
 > endpoints, validation and the scheduling math are written, typechecked, linted
-> and unit-tested. Nothing has run against a live Postgres or Redis yet, and
-> **nothing sends email** — the worker is still a stub. There is no auth. See
+> and unit-tested, and the schema is **now migrated onto a live hosted Postgres
+> (Neon)** — the app's pooled connection and the Redis (Upstash) connection are
+> both verified against the running services. But **nothing sends email** — the
+> worker is still a stub — and there is no auth. See
 > [Known gaps](#known-gaps); design decisions are logged in
 > [DECISIONS.md](./DECISIONS.md).
 
 ## Stack
 
-| Layer       | Choice                                                  |
-| ----------- | ------------------------------------------------------- |
-| Monorepo    | npm workspaces (`backend`, `frontend`)                  |
-| API         | Express 5 + TypeScript (ESM), Zod-validated config      |
-| Database    | Postgres 17 via Prisma 7 (`prisma-client` + `PrismaPg`) |
-| Queue       | BullMQ 6 + ioredis on Redis 8                           |
-| Web         | Next.js 16 App Router, React 19, Tailwind v4            |
-| Local infra | Docker Compose (Postgres + Redis only)                  |
-| Tests       | Vitest 4 + supertest (backend)                          |
+| Layer    | Choice                                                   |
+| -------- | -------------------------------------------------------- |
+| Monorepo | npm workspaces (`backend`, `frontend`)                   |
+| API      | Express 5 + TypeScript (ESM), Zod-validated config       |
+| Database | Postgres 17 via Prisma 7 (`prisma-client` + `PrismaPg`)  |
+| Queue    | BullMQ 6 + ioredis on Redis 8                            |
+| Web      | Next.js 16 App Router, React 19, Tailwind v4             |
+| Hosting  | Neon (Postgres) + Upstash (Redis); local Docker optional |
+| Tests    | Vitest 4 + supertest (backend)                           |
 
 ## Prerequisites
 
 - **Node 22.12+** and **npm 10+** (`.nvmrc` pins the version used here)
-- **Docker Desktop** — required for Postgres and Redis
-
-  Docker has never successfully run on the machine this was built on: the Linux
-  engine does not finish booting (`docker info` returns a 500 from
-  `dockerDesktopLinuxEngine`). So `docker-compose.yml` is written and commented but
-  has never been executed, and no migration has ever been applied. Expect to debug
-  both on first run.
+- **A Postgres database and a Redis instance.** This project runs against hosted
+  free tiers — **Neon** for Postgres and **Upstash** for Redis — because Docker
+  could not run on the build machine: host virtualization could not be enabled at
+  the OS level despite BIOS support (a driver/policy issue). See
+  [DECISIONS.md](./DECISIONS.md) "Phase 2.1 — mid-project pivot". Any Postgres 14+
+  and any Redis 6+ will do. If you can run Docker and prefer local datastores, see
+  [Optional: local datastores with Docker](#optional-local-datastores-with-docker).
 
 ## Setup
 
@@ -42,28 +44,34 @@ That installs both workspaces and runs `prisma generate` (backend `postinstall`)
 which writes the typed client into `backend/src/db/generated/` — gitignored, so
 it must be generated on every fresh clone.
 
-Then create the three environment files from their committed examples:
+Then create the environment files from their committed examples:
 
 ```bash
-cp .env.example .env
 cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env.local
 ```
 
 <!-- PLACEHOLDER: add seed data here once there is any. -->
 
-Fill in `POSTGRES_PASSWORD` in `.env` and use the same value inside
-`DATABASE_URL` in `backend/.env`. Then start the datastores and apply the schema:
+Fill in `backend/.env` with your own datastore URLs:
+
+- **`DATABASE_URL`** — the Neon **pooled** endpoint (host contains `-pooler`).
+  This is what the API uses at runtime.
+- **`DIRECT_URL`** — the Neon **unpooled** endpoint (same credentials, host
+  _without_ `-pooler`). Prisma Migrate uses this: the session-level advisory lock
+  it takes does not survive PgBouncer transaction pooling. On a non-pooled
+  Postgres, set it equal to `DATABASE_URL`.
+- **`REDIS_URL`** — the Upstash `rediss://` URL (TLS; note the double `s`).
+
+Then apply the schema:
 
 ```bash
-npm run db:up
 npm run prisma:deploy
 ```
 
 `prisma:deploy` applies the committed migration
-(`backend/prisma/migrations/20260902105926_initial_schema/`). That migration was
-generated offline with `prisma migrate diff` and **has never been applied to a
-database** — expect to debug the first run.
+(`backend/prisma/migrations/20260902105926_initial_schema/`) through `DIRECT_URL`.
+It has been applied to Neon; on a fresh database it runs clean.
 
 Finally register a sender, because `POST /api/emails/schedule` will not create one
 implicitly:
@@ -71,6 +79,29 @@ implicitly:
 ```bash
 npm run sender:create -- --email you@example.com --name "Your Name"
 ```
+
+## Optional: local datastores with Docker
+
+You do **not** need this — the default setup uses hosted Neon + Upstash. It is
+here for anyone who can run Docker and would rather host Postgres and Redis
+locally. (It has never been executed on the build machine, where Docker does not
+run; that is the whole reason for the hosted pivot.)
+
+```bash
+cp .env.example .env           # fill in POSTGRES_PASSWORD
+npm run db:up                  # start Postgres + Redis in the background
+```
+
+Then point `backend/.env` at the local services instead of the hosted URLs:
+
+```bash
+DATABASE_URL=postgresql://reachinbox:<password>@localhost:5432/reachinbox_dev?schema=public
+DIRECT_URL=postgresql://reachinbox:<password>@localhost:5432/reachinbox_dev?schema=public
+REDIS_URL=redis://localhost:6379
+```
+
+`DIRECT_URL` equals `DATABASE_URL` here: a local Postgres has no PgBouncer pooler
+to split. Run `npm run prisma:deploy` afterwards exactly as above.
 
 ## Running
 
@@ -89,9 +120,8 @@ curl http://localhost:4000/health
 ```
 
 `/health` is liveness and touches no dependency. `/health/ready` probes Postgres
-and Redis and returns **503** with a per-dependency report when either is down —
-which is the expected answer before `npm run db:up`. <http://localhost:3000>
-renders the same report in the browser.
+and Redis and returns **503** with a per-dependency report when either is
+unreachable. <http://localhost:3000> renders the same report in the browser.
 
 <!-- PLACEHOLDER: document the campaign/schedule screens as they land. -->
 
@@ -163,7 +193,12 @@ variable at startup and throws a single list of what is missing or malformed
 rather than failing later on first use. Secret-looking values are redacted from
 that output.
 
-### Repo root `.env` — consumed by `docker-compose.yml` only
+### Repo root `.env` — only for the optional local-Docker path
+
+Not needed for the default hosted setup. Consumed by `docker-compose.yml` if and
+only if you run `npm run db:up` (see
+[Optional: local datastores with Docker](#optional-local-datastores-with-docker)).
+"Required" below means required _in that case_.
 
 | Variable            | Required | Default | Notes                          |
 | ------------------- | -------- | ------- | ------------------------------ |
@@ -175,19 +210,20 @@ that output.
 
 ### `backend/.env` — consumed by the API and the worker
 
-| Variable        | Required | Default                 | Notes                                       |
-| --------------- | -------- | ----------------------- | ------------------------------------------- |
-| `NODE_ENV`      | no       | `development`           | `development` \| `test` \| `production`     |
-| `PORT`          | no       | `4000`                  |                                             |
-| `LOG_LEVEL`     | no       | `info`                  | pino levels, plus `silent`                  |
-| `DATABASE_URL`  | **yes**  | —                       | Must start `postgresql://`                  |
-| `REDIS_URL`     | **yes**  | —                       | Must start `redis://` or `rediss://`        |
-| `CORS_ORIGIN`   | no       | `http://localhost:3000` | Comma-separated list of allowed origins     |
-| `SMTP_HOST`     | no       | —                       | Optional now; required in the sending phase |
-| `SMTP_PORT`     | no       | —                       |                                             |
-| `SMTP_USER`     | no       | —                       |                                             |
-| `SMTP_PASSWORD` | no       | —                       |                                             |
-| `MAIL_FROM`     | no       | —                       |                                             |
+| Variable        | Required | Default                 | Notes                                                                                                                    |
+| --------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `NODE_ENV`      | no       | `development`           | `development` \| `test` \| `production`                                                                                  |
+| `PORT`          | no       | `4000`                  |                                                                                                                          |
+| `LOG_LEVEL`     | no       | `info`                  | pino levels, plus `silent`                                                                                               |
+| `DATABASE_URL`  | **yes**  | —                       | Neon **pooled** URL (host has `-pooler`); app runtime. Must start `postgresql://`                                        |
+| `DIRECT_URL`    | migrate  | —                       | Neon **unpooled** URL (no `-pooler`); used by Prisma Migrate only. Falls back to `DATABASE_URL`; not read at app runtime |
+| `REDIS_URL`     | **yes**  | —                       | Upstash TLS URL. Must start `redis://` or `rediss://`                                                                    |
+| `CORS_ORIGIN`   | no       | `http://localhost:3000` | Comma-separated list of allowed origins                                                                                  |
+| `SMTP_HOST`     | no       | —                       | Optional now; required in the sending phase                                                                              |
+| `SMTP_PORT`     | no       | —                       |                                                                                                                          |
+| `SMTP_USER`     | no       | —                       |                                                                                                                          |
+| `SMTP_PASSWORD` | no       | —                       |                                                                                                                          |
+| `MAIL_FROM`     | no       | —                       |                                                                                                                          |
 
 ### `frontend/.env.local`
 
@@ -217,7 +253,7 @@ a send; the worker is the only thing that talks to SMTP. That split is what make
 ```
 backend/
   prisma/schema.prisma      senders, schedule_batches, scheduled_emails
-  prisma/migrations/        generated offline; never yet applied
+  prisma/migrations/        generated offline; applied to Neon
   src/config/               env.ts = pure validation, config.ts = load + freeze
   src/db/                   Prisma client, Redis connection factory
   src/middleware/           request logging, 404, terminal error handler
@@ -276,20 +312,20 @@ batch, so a slow loop cannot drift the spacing. DECISIONS.md works through the
 
 Run from the repo root; each delegates into the workspaces.
 
-| Command                                       | Does                                                          |
-| --------------------------------------------- | ------------------------------------------------------------- |
-| `npm run build`                               | `tsc` the backend, `next build` the frontend                  |
-| `npm run typecheck`                           | `tsc --noEmit` in both workspaces                             |
-| `npm run lint`                                | ESLint in both workspaces                                     |
-| `npm test`                                    | Vitest (backend) — passes with the datastores down            |
-| `npm run format`                              | Prettier write across the repo                                |
-| `npm run db:up` / `:down`                     | Start / stop Postgres + Redis                                 |
-| `npm run db:reset`                            | **Destroys** the volumes and recreates them                   |
-| `npm run db:logs`                             | Tail container logs                                           |
-| `npm run prisma:migrate`                      | `prisma migrate dev` (creates a new migration)                |
-| `npm run prisma:deploy`                       | `prisma migrate deploy` (applies committed ones)              |
-| `npm run prisma:studio`                       | Prisma Studio                                                 |
-| `npm run sender:create -- --email … --name …` | Register a sender (there is no endpoint for this, on purpose) |
+| Command                                       | Does                                                                 |
+| --------------------------------------------- | -------------------------------------------------------------------- |
+| `npm run build`                               | `tsc` the backend, `next build` the frontend                         |
+| `npm run typecheck`                           | `tsc --noEmit` in both workspaces                                    |
+| `npm run lint`                                | ESLint in both workspaces                                            |
+| `npm test`                                    | Vitest (backend) — passes with the datastores down                   |
+| `npm run format`                              | Prettier write across the repo                                       |
+| `npm run db:up` / `:down`                     | _Optional local Docker:_ start / stop Postgres + Redis               |
+| `npm run db:reset`                            | _Optional local Docker:_ **destroys** the volumes and recreates them |
+| `npm run db:logs`                             | _Optional local Docker:_ tail container logs                         |
+| `npm run prisma:migrate`                      | `prisma migrate dev` (creates a new migration)                       |
+| `npm run prisma:deploy`                       | `prisma migrate deploy` (applies committed ones)                     |
+| `npm run prisma:studio`                       | Prisma Studio                                                        |
+| `npm run sender:create -- --email … --name …` | Register a sender (there is no endpoint for this, on purpose)        |
 
 ## Known gaps
 
@@ -302,13 +338,15 @@ These are deliberate, not oversights — each is scheduled for a later phase.
 - **Nothing sends.** The worker still throws `NotImplementedError`, so jobs enqueue
   and sit. A no-op processor would mark sends complete with no email leaving, which
   is silent data loss. No SMTP credentials are configured either.
-- **No SQL has been executed.** The migration was generated offline with
-  `prisma migrate diff` and never applied; the test suite mocks Prisma and BullMQ, so
-  it proves the queries are _built_ correctly, not that they _run_. An integration
-  suite against a live Postgres is the missing half, and it needs Docker.
-- **`docker-compose.yml` is unverified.** Docker Desktop's Linux engine does not
-  finish starting on this machine (`docker info` returns a 500), so Postgres and
-  Redis have never been up.
+- **No automated integration tests against the live datastores.** The migration is
+  applied to Neon and connectivity is verified by hand (a pooled query through the
+  node-postgres adapter and an Upstash TLS `PING`), but the test suite still mocks
+  Prisma and BullMQ — it proves the queries are _built_ correctly, not that they
+  _run_. An integration suite against a live Postgres and Redis is the missing half.
+- **`docker-compose.yml` is optional and unrun.** It is kept as a local-Docker
+  fallback, but the default path uses hosted Neon + Upstash (Docker could not run on
+  this machine), so the compose file has still never been executed. Not a blocker —
+  nothing in the default setup touches it.
 - **No cancel, reschedule, or detail endpoint**, and no reconciliation sweep for
   rows left with `bullmq_job_id IS NULL`.
 - **`hourly_limit` is enforced at schedule time only**, by spacing. Nothing enforces
