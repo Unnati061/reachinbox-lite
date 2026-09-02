@@ -1,434 +1,519 @@
-# ReachInbox-lite
+# ReachInbox Lite
 
-Schedule email campaigns and watch them send.
+A full-stack email scheduling system built with **Next.js, Express.js, PostgreSQL, BullMQ, Redis, and Ethereal SMTP**.
 
-> **Status: final verification and release evidence (phase 5).** The scheduler,
-> live dashboard, Google OAuth, SMTP worker, Redis-backed throttles, Slack OAuth,
-> and OpenSearch-compatible search projection are implemented. Live datastore,
-> Slack-installation, and Elasticsearch API checks have passed. The remaining
-> evidence is a deliberately triggered Ethereal delivery and Slack rate-limit
-> notification, plus a recorded restart/load demo. See
-> [Known gaps](#known-gaps); design decisions are logged in
-> [DECISIONS.md](./DECISIONS.md).
+ReachInbox Lite allows users to schedule email campaigns, process scheduled messages through a persistent Redis-backed queue, enforce sending limits, and track email delivery through a web dashboard.
 
-## Stack
+## Features
 
-| Layer    | Choice                                                   |
-| -------- | -------------------------------------------------------- |
-| Monorepo | npm workspaces (`backend`, `frontend`)                   |
-| API      | Express 5 + TypeScript (ESM), Zod-validated config       |
-| Database | Postgres 17 via Prisma 7 (`prisma-client` + `PrismaPg`)  |
-| Queue    | BullMQ 6 + ioredis on Redis 8                            |
-| Web      | Next.js 16 App Router, React 19, Tailwind v4             |
-| Hosting  | Neon (Postgres) + Upstash (Redis); local Docker optional |
-| Tests    | Vitest 4 + supertest (backend)                           |
+* Google OAuth authentication
+* Schedule emails for a future time
+* Multiple recipients per campaign
+* CSV/text recipient input
+* Configurable delay between emails
+* Per-sender hourly sending limits
+* Redis-backed rate limiting
+* Persistent BullMQ delayed jobs
+* Dedicated email worker
+* PostgreSQL persistence with Prisma
+* Ethereal SMTP for safe email testing
+* Scheduled Emails dashboard
+* Sent Emails dashboard
+* Email search
+* Live BullMQ queue dashboard
+* Configurable worker concurrency
+* Idempotent job processing
+* Restart-safe scheduled delivery
+* Slack OAuth integration for rate-limit notifications
+* Health and readiness endpoints
 
-## Prerequisites
+## Tech Stack
 
-- **Node 22.12+** and **npm 10+** (`.nvmrc` pins the version used here)
-- **A Postgres database and a Redis instance.** This project runs against hosted
-  free tiers — **Neon** for Postgres and **Upstash** for Redis — because Docker
-  could not run on the build machine: host virtualization could not be enabled at
-  the OS level despite BIOS support (a driver/policy issue). See
-  [DECISIONS.md](./DECISIONS.md) "Phase 2.1 — mid-project pivot". Any Postgres 14+
-  and any Redis 6+ will do. If you can run Docker and prefer local datastores, see
-  [Optional: local datastores with Docker](#optional-local-datastores-with-docker).
+| Layer          | Technology                               |
+| -------------- | ---------------------------------------- |
+| Frontend       | Next.js, React, TypeScript, Tailwind CSS |
+| Backend        | Express.js, TypeScript                   |
+| Database       | PostgreSQL + Prisma                      |
+| Queue          | BullMQ + Redis                           |
+| Email          | Nodemailer + Ethereal SMTP               |
+| Authentication | Auth.js + Google OAuth                   |
+| Search         | Elasticsearch/OpenSearch-compatible API  |
+| Testing        | Vitest + Supertest                       |
 
-## Setup
+## Architecture
+
+```text
+                         ┌─────────────────────┐
+                         │      Next.js UI     │
+                         │  Dashboard / Compose│
+                         └──────────┬──────────┘
+                                    │ HTTP
+                                    ▼
+                         ┌─────────────────────┐
+                         │    Express API      │
+                         │                     │
+                         │  Validate request   │
+                         │  Store email        │
+                         │  Enqueue job        │
+                         └──────┬───────┬──────┘
+                                │       │
+                         Postgres│       │BullMQ
+                                ▼       ▼
+                       ┌───────────┐  ┌───────────┐
+                       │ PostgreSQL│  │   Redis   │
+                       │  Source   │  │   Queue   │
+                       │ of truth  │  │           │
+                       └───────────┘  └─────┬─────┘
+                                            │
+                                            ▼
+                                   ┌─────────────────┐
+                                   │  Email Worker   │
+                                   │                 │
+                                   │ Rate limiting   │
+                                   │ Retry handling  │
+                                   │ Idempotency     │
+                                   └────────┬────────┘
+                                            │
+                                            ▼
+                                      Ethereal SMTP
+```
+
+The API and worker run as separate processes.
+
+The API persists scheduled emails in PostgreSQL and creates delayed BullMQ jobs. The worker consumes those jobs and handles SMTP delivery.
+
+Scheduled jobs are stored in Redis/BullMQ rather than relying on in-memory timers, allowing future jobs to survive process restarts.
+
+## Scheduling
+
+For every recipient, the system creates:
+
+1. A persistent `scheduled_emails` record in PostgreSQL.
+2. A delayed BullMQ job in Redis.
+
+The effective interval between emails considers both the requested delay and the hourly sending limit:
+
+```text
+effectiveStepMs =
+  max(
+    delay_between_emails_ms,
+    ceil(3_600_000 / hourly_limit)
+  )
+```
+
+Each email receives its own scheduled timestamp.
+
+No cron jobs or in-memory timers are used for email scheduling.
+
+## Rate Limiting
+
+Email delivery is protected at worker execution time.
+
+The system uses:
+
+* Minimum interval between SMTP attempts
+* Rolling hourly limit per sender
+* Redis-backed shared rate-limit state
+
+This allows rate limiting to work across multiple worker processes.
+
+When the hourly limit is reached, the job is delayed until the next available sending slot instead of being dropped.
+
+Example configuration:
+
+```env
+WORKER_CONCURRENCY=5
+MIN_SEND_INTERVAL_MS=2000
+MAX_EMAILS_PER_HOUR_PER_SENDER=200
+```
+
+## Persistence and Restart Safety
+
+Email state is persisted in PostgreSQL and delivery jobs are persisted through BullMQ/Redis.
+
+The worker does not depend on an in-memory schedule.
+
+```text
+Schedule email
+      ↓
+PostgreSQL + BullMQ
+      ↓
+Worker stopped
+      ↓
+Worker restarted
+      ↓
+BullMQ recovers delayed job
+      ↓
+Email sent
+```
+
+BullMQ job IDs use the scheduled email ID, providing an idempotent identifier for job processing.
+
+## Dashboard
+
+### Scheduled Emails
+
+Displays:
+
+* Recipient
+* Subject
+* Scheduled time
+* Status
+
+### Sent Emails
+
+Displays:
+
+* Recipient
+* Subject
+* Sent time
+* Status
+
+### Compose
+
+The compose interface supports:
+
+* Sender selection
+* Subject
+* Email body
+* Multiple recipients
+* CSV/text lead input
+* Start time
+* Delay between emails
+* Hourly sending limit
+
+## Search
+
+Emails can be searched through:
+
+```text
+GET /api/emails/search?q=<term>
+```
+
+Search covers:
+
+* Recipient email
+* Sender email
+* Subject
+* Status
+
+PostgreSQL remains the source of truth while Elasticsearch/OpenSearch acts as a searchable read projection.
+
+## Live Queue Monitoring
+
+BullMQ queue state is available at:
+
+```text
+http://localhost:4000/admin/queues
+```
+
+The dashboard provides visibility into:
+
+* Waiting jobs
+* Active jobs
+* Delayed jobs
+* Completed jobs
+* Failed jobs
+
+## How to Run
+
+### Prerequisites
+
+Make sure you have:
+
+* Node.js 22.12+
+* npm 10+
+* PostgreSQL 14+
+* Redis 6+
+
+The project can use hosted PostgreSQL and Redis services such as Neon and Upstash.
+
+You also need:
+
+* Google OAuth credentials
+* Ethereal SMTP credentials
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/Unnati061/reachinbox.git
+cd reachinbox
+```
+
+### 2. Install dependencies
 
 ```bash
 npm install
 ```
 
-That installs both workspaces and runs `prisma generate` (backend `postinstall`),
-which writes the typed client into `backend/src/db/generated/` — gitignored, so
-it must be generated on every fresh clone.
-
-Then create the environment files from their committed examples:
+### 3. Create environment files
 
 ```bash
 cp backend/.env.example backend/.env
 cp frontend/.env.example frontend/.env.local
 ```
 
-<!-- PLACEHOLDER: add seed data here once there is any. -->
+### 4. Configure the backend
 
-Fill in `backend/.env` with your own datastore URLs:
+Update `backend/.env`:
 
-- **`DATABASE_URL`** — the Neon **pooled** endpoint (host contains `-pooler`).
-  This is what the API uses at runtime.
-- **`DIRECT_URL`** — the Neon **unpooled** endpoint (same credentials, host
-  _without_ `-pooler`). Prisma Migrate uses this: the session-level advisory lock
-  it takes does not survive PgBouncer transaction pooling. On a non-pooled
-  Postgres, set it equal to `DATABASE_URL`.
-- **`REDIS_URL`** — the Upstash `rediss://` URL (TLS; note the double `s`).
+```env
+NODE_ENV=development
+PORT=4000
 
-Then apply the schema:
+DATABASE_URL=your_postgresql_connection_string
+DIRECT_URL=your_direct_postgresql_connection_string
 
-```bash
-npm run prisma:deploy
+REDIS_URL=your_redis_connection_string
+
+SMTP_HOST=smtp.ethereal.email
+SMTP_PORT=587
+SMTP_USER=your_ethereal_username
+SMTP_PASSWORD=your_ethereal_password
+MAIL_FROM=your_ethereal_email
+
+CORS_ORIGIN=http://localhost:3000
+
+WORKER_CONCURRENCY=5
+MIN_SEND_INTERVAL_MS=2000
+MAX_EMAILS_PER_HOUR_PER_SENDER=200
 ```
 
-`prisma:deploy` applies the committed migration
-(`backend/prisma/migrations/20260902105926_initial_schema/`) through `DIRECT_URL`.
-It has been applied to Neon; on a fresh database it runs clean.
+For Upstash Redis, use the TLS connection URL provided by Upstash.
 
-Finally register a sender, because `POST /api/emails/schedule` will not create one
-implicitly:
+### 5. Configure Google OAuth
 
-```bash
-npm run sender:create -- --email you@example.com --name "Your Name"
+Update `frontend/.env.local`:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://localhost:4000
+
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+AUTH_SECRET=your_auth_secret
 ```
 
-## Optional: local datastores with Docker
-
-You do **not** need this — the default setup uses hosted Neon + Upstash. It is
-here for anyone who can run Docker and would rather host Postgres and Redis
-locally. (It has never been executed on the build machine, where Docker does not
-run; that is the whole reason for the hosted pivot.)
-
-```bash
-cp .env.example .env           # fill in POSTGRES_PASSWORD
-npm run db:up                  # start Postgres + Redis in the background
-```
-
-Then point `backend/.env` at the local services instead of the hosted URLs:
-
-```bash
-DATABASE_URL=postgresql://reachinbox:<password>@localhost:5432/reachinbox_dev?schema=public
-DIRECT_URL=postgresql://reachinbox:<password>@localhost:5432/reachinbox_dev?schema=public
-REDIS_URL=redis://localhost:6379
-```
-
-`DIRECT_URL` equals `DATABASE_URL` here: a local Postgres has no PgBouncer pooler
-to split. Run `npm run prisma:deploy` afterwards exactly as above.
-
-## Running
-
-| Command                | What it starts                                 |
-| ---------------------- | ---------------------------------------------- |
-| `npm run dev`          | API (`:4000`) + web (`:3000`)                  |
-| `npm run dev:all`      | API + web + the queue worker                   |
-| `npm run dev:backend`  | API only, `tsx watch`                          |
-| `npm run dev:frontend` | Web only, `next dev`                           |
-| `npm run dev:worker`   | Queue worker only (separate process by design) |
-
-Check it came up:
-
-```bash
-curl http://localhost:4000/health
-```
-
-`/health` is liveness and touches no dependency. `/health/ready` probes Postgres
-and Redis and returns **503** with a per-dependency report when either is
-unreachable. <http://localhost:3000> renders the same report in the browser.
-
-<!-- PLACEHOLDER: document the campaign/schedule screens as they land. -->
-
-## API
-
-Base path `/api`, no version segment (see DECISIONS.md). Request and response
-bodies are snake_case; every error is
-`{ error: { code, message, details?, requestId } }`.
-
-### `POST /api/emails/schedule`
-
-Writes one `scheduled_emails` row per recipient and enqueues one delayed BullMQ job
-per row. **Jobs sit in Redis and never fire** until the worker exists.
-
-| Field                     | Required    | Notes                                                                                          |
-| ------------------------- | ----------- | ---------------------------------------------------------------------------------------------- |
-| `sender`                  | yes         | Registered sender's email **or** id. Never created implicitly — 404 if unknown.                |
-| `subject`                 | yes         | 1–998 characters.                                                                              |
-| `body`                    | yes         | 1–100 000 characters, plain text.                                                              |
-| `recipients`              | yes         | One address as a string, or an array of up to 500. Lowercased; duplicates dropped and counted. |
-| `start_time`              | no          | ISO-8601 **with an offset** (`…Z` or `+05:30`). Defaults to now.                               |
-| `delay_between_emails_ms` | conditional | Required when there is more than one recipient. 0 – 86 400 000.                                |
-| `hourly_limit`            | no          | Max sends per rolling hour. Widens the gap when it is tighter than `delay_between_emails_ms`.  |
-
-Unknown keys are rejected, so a typo'd `hourly_limits` is a 400 rather than an
-unthrottled blast.
-
-```bash
-curl -X POST http://localhost:4000/api/emails/schedule \
-  -H 'content-type: application/json' \
-  -d '{"sender":"you@example.com","subject":"Hello","body":"Hi there",
-       "recipients":["a@example.com","b@example.com"],
-       "start_time":"2026-09-03T09:00:00Z","delay_between_emails_ms":60000,
-       "hourly_limit":30}'
-```
-
-**201** returns the batch: `batch_id`, `sender`, `scheduled_count`,
-`duplicates_removed`, `start_at`, `last_scheduled_at`, `effective_step_ms`,
-`requested_delay_between_emails_ms`, `hourly_limit`, `widened_by_hourly_limit`, and
-`emails[]` (id, recipient, `scheduled_at`, status). Compare `effective_step_ms` with
-`requested_delay_between_emails_ms` to see whether `hourly_limit` bound.
-
-| Status | When                                                                                                                                 |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 400    | Validation failed. `details` is `[{ path, message }]`, e.g. `recipients.1`.                                                          |
-| 404    | No such sender.                                                                                                                      |
-| 422    | Sender disabled, `start_time` more than 5 minutes past, or the batch would run past the 90-day horizon. `details.reason` says which. |
-| 503    | Rows committed but the queue refused them — nothing is armed. `details` carries `batch_id` and `enqueued: false`.                    |
-
-### `GET /api/emails/scheduled` · `GET /api/emails/sent`
-
-Paginated lists — `pending`/`processing` soonest-first, `sent`/`failed`
-newest-first. Query: `?page=1&per_page=25` (max 100). Response is
-`{ data: [...], meta: { page, per_page, total, total_pages, has_more } }`. List rows
-omit `body` on purpose; a page of 100 at the size cap would be a 10 MB payload.
-
-```bash
-curl 'http://localhost:4000/api/emails/scheduled?page=1&per_page=25'
-```
-
-> **No authentication.** Any caller that can reach the port can send as any
-> registered sender and read every recipient, subject and error. Localhost binding
-> and CORS do not stop `curl`. Do not expose this beyond a dev machine.
-
-## Environment variables
-
-Nothing is guessed at runtime: `backend/src/config/config.ts` validates every
-variable at startup and throws a single list of what is missing or malformed
-rather than failing later on first use. Secret-looking values are redacted from
-that output.
-
-### Repo root `.env` — only for the optional local-Docker path
-
-Not needed for the default hosted setup. Consumed by `docker-compose.yml` if and
-only if you run `npm run db:up` (see
-[Optional: local datastores with Docker](#optional-local-datastores-with-docker)).
-"Required" below means required _in that case_.
-
-| Variable            | Required | Default | Notes                          |
-| ------------------- | -------- | ------- | ------------------------------ |
-| `POSTGRES_USER`     | yes      | —       | Compose fails fast if unset    |
-| `POSTGRES_PASSWORD` | yes      | —       | Local-only; never committed    |
-| `POSTGRES_DB`       | yes      | —       | Database created on first boot |
-| `POSTGRES_PORT`     | no       | `5432`  | Host-side port                 |
-| `REDIS_PORT`        | no       | `6379`  | Host-side port                 |
-
-### `backend/.env` — consumed by the API and the worker
-
-| Variable                         | Required | Default                 | Notes                                                                                                                    |
-| -------------------------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `NODE_ENV`                       | no       | `development`           | `development` \| `test` \| `production`                                                                                  |
-| `PORT`                           | no       | `4000`                  |                                                                                                                          |
-| `LOG_LEVEL`                      | no       | `info`                  | pino levels, plus `silent`                                                                                               |
-| `DATABASE_URL`                   | **yes**  | —                       | Neon **pooled** URL (host has `-pooler`); app runtime. Must start `postgresql://`                                        |
-| `DIRECT_URL`                     | migrate  | —                       | Neon **unpooled** URL (no `-pooler`); used by Prisma Migrate only. Falls back to `DATABASE_URL`; not read at app runtime |
-| `REDIS_URL`                      | **yes**  | —                       | Upstash TLS URL. Must start `redis://` or `rediss://`                                                                    |
-| `CORS_ORIGIN`                    | no       | `http://localhost:3000` | Comma-separated list of allowed origins                                                                                  |
-| `SMTP_HOST`                      | no       | —                       | Optional now; required in the sending phase                                                                              |
-| `SMTP_PORT`                      | no       | —                       |                                                                                                                          |
-| `SMTP_USER`                      | no       | —                       |                                                                                                                          |
-| `SMTP_PASSWORD`                  | no       | —                       |                                                                                                                          |
-| `MAIL_FROM`                      | no       | —                       |                                                                                                                          |
-| `WORKER_CONCURRENCY`             | no       | `5`                     | Parallel jobs in one worker process; safe because rate state is Redis-backed                                             |
-| `MIN_SEND_INTERVAL_MS`           | no       | `2000`                  | Redis-backed global minimum gap between SMTP attempts; use `0` only to disable this gap                                  |
-| `MAX_EMAILS_PER_HOUR_PER_SENDER` | no       | `200`                   | Rolling one-hour cap per registered sender, enforced by every worker instance                                            |
-
-### `frontend/.env.local`
-
-| Variable                   | Required | Default                 | Notes                                         |
-| -------------------------- | -------- | ----------------------- | --------------------------------------------- |
-| `NEXT_PUBLIC_API_BASE_URL` | yes      | `http://localhost:4000` | Inlined into the browser bundle — no secrets  |
-| `GOOGLE_CLIENT_ID`         | **yes**  | —                       | Google OAuth web-client id; server only       |
-| `GOOGLE_CLIENT_SECRET`     | **yes**  | —                       | Google OAuth secret; server only              |
-| `AUTH_SECRET`              | **yes**  | —                       | Long random key used to sign Auth.js sessions |
-
-In Google Cloud Console, register this development redirect URI exactly:
+Configure this redirect URI in Google Cloud Console:
 
 ```text
 http://localhost:3000/api/auth/callback/google
 ```
 
-The dashboard redirects to `/login` when no session exists. Google returns the
-authenticated user to the dashboard, where their name, email and avatar appear
-in the header. Use **Logout** to clear the local Auth.js session. None of the
-three OAuth values may use the `NEXT_PUBLIC_` prefix.
+Do not commit `.env` or `.env.local` files.
 
-## Architecture
+### 6. Apply database migrations
 
-<!-- PLACEHOLDER: expand into a real architecture doc from DECISIONS.md entries. -->
-
-```
-browser ──HTTP──> Express API ──> Postgres        (source of truth)
-                       │
-                       └──enqueue──> Redis (BullMQ) ──> worker ──SMTP──> recipient
+```bash
+npm run prisma:deploy
 ```
 
-Two processes share one codebase and one database. The API only ever _enqueues_
-a send; the worker is the only thing that talks to SMTP. That split is what makes
-"schedule for later" survive an API restart — the delay lives in Redis, not in a
-`setTimeout`.
+### 7. Register a sender
 
-### Delivery controls
+Before scheduling emails, register a sender:
 
-The scheduling API spaces a single batch for good UX, but that alone cannot
-protect a sender when several batches or workers overlap. The worker therefore
-uses two Redis-backed controls at dispatch time:
-
-- BullMQ's queue limiter guarantees `MIN_SEND_INTERVAL_MS` between SMTP attempts
-  across all worker processes.
-- A Lua-scripted sorted-set reservation tracks each sender's attempts in a
-  rolling hour. Its trim, count and reserve operations are one Redis transaction,
-  so two workers cannot both take the final allowed slot. A job at the cap is
-  moved back into BullMQ's delayed state at the earliest release time without
-  changing its id or consuming a retry.
-
-Attempts are counted rather than only accepted messages: an SMTP provider can
-throttle connection and rejected-recipient attempts too, and allowing retries to
-escape the cap would create precisely the burst this safeguard exists to avoid.
-The trade-off is conservative capacity after transient SMTP failures.
-
-Open `http://localhost:4000/admin/queues` while the API is running for a small
-live BullMQ dashboard. It polls queue counts every two seconds and is deliberately
-separate from the Next app so the queue is observable if the frontend is down.
-
-### Layout
-
-```
-backend/
-  prisma/schema.prisma      senders, schedule_batches, scheduled_emails
-  prisma/migrations/        generated offline; applied to Neon
-  src/config/               env.ts = pure validation, config.ts = load + freeze
-  src/db/                   Prisma client, Redis connection factory
-  src/middleware/           request logging, 404, terminal error handler
-  src/routes/               Express routers + wire serializers
-  src/schemas/              zod request schemas (the only input trust boundary)
-  src/scripts/              one-off CLIs (create-sender)
-  src/services/             business logic, framework-free
-  src/workers/              BullMQ worker + its own process entrypoint
-  tests/                    Vitest; runs green with Postgres and Redis down
-frontend/
-  app/                      App Router pages + Tailwind entry (globals.css)
-  components/ui/            reusable primitives: button, input, table, modal
-  components/               app-specific composites
-  lib/api.ts                typed fetch client — the only place fetch is called
-  types/                    hand-mirrored API response shapes
+```bash
+npm run sender:create -- --email you@example.com --name "Your Name"
 ```
 
-### The scheduling math
+The sender must be registered before it can be used for scheduling.
 
-`src/services/schedule-planner.ts` is pure — no Express, no Prisma, no BullMQ, and
-no clock (`now` is a parameter), which is why it is unit-tested with both datastores
-down. One request becomes one arithmetic progression:
+### 8. Start the application
 
-```
-effectiveStepMs = max(delay_between_emails_ms, ceil(3_600_000 / hourly_limit))
-scheduledAt(i)  = start_time + i * effectiveStepMs   // absolute, stored in Postgres
-delayMs(i)      = max(0, scheduledAt(i) - now)       // relative, handed to BullMQ
+The easiest way to start the complete application is:
+
+```bash
+npm run dev:all
 ```
 
-`max` and not `+`, because the two throttles are one constraint at two resolutions.
-`ceil` and not `floor`, because rounding down fits an extra send inside the hour for
-every limit that does not divide 3 600 000 evenly. One `now` sample for the whole
-batch, so a slow loop cannot drift the spacing. DECISIONS.md works through the
-`hourly_limit = 7` case in full.
+This starts:
+
+```text
+Frontend  → http://localhost:3000
+Backend   → http://localhost:4000
+Worker    → BullMQ email worker
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+Sign in with Google to access the dashboard.
+
+## Run Services Individually
+
+### Backend
+
+```bash
+npm run dev:backend
+```
+
+Runs the API on:
+
+```text
+http://localhost:4000
+```
+
+### Frontend
+
+```bash
+npm run dev:frontend
+```
+
+Runs the Next.js application on:
+
+```text
+http://localhost:3000
+```
+
+### Worker
+
+```bash
+npm run dev:worker
+```
+
+Starts the BullMQ email worker.
+
+## Verify the Application
+
+Check backend health:
+
+```bash
+curl http://localhost:4000/health
+```
+
+Check backend readiness:
+
+```bash
+curl http://localhost:4000/health/ready
+```
+
+Open the frontend:
+
+```text
+http://localhost:3000
+```
+
+Open the BullMQ dashboard:
+
+```text
+http://localhost:4000/admin/queues
+```
+
+## API
+
+### Schedule Emails
+
+```http
+POST /api/emails/schedule
+```
+
+Example:
+
+```json
+{
+  "sender": "you@example.com",
+  "subject": "Hello",
+  "body": "Hi there",
+  "recipients": [
+    "first@example.com",
+    "second@example.com"
+  ],
+  "start_time": "2026-09-03T09:00:00Z",
+  "delay_between_emails_ms": 60000,
+  "hourly_limit": 30
+}
+```
+
+### Scheduled Emails
+
+```http
+GET /api/emails/scheduled?page=1&per_page=25
+```
+
+### Sent Emails
+
+```http
+GET /api/emails/sent?page=1&per_page=25
+```
 
 ### Search
 
-`GET /api/emails/search?q=<term>` searches recipient email, sender email,
-subject and status, returning at most 50 records. Elasticsearch/OpenSearch is a
-rebuildable read projection: scheduling upserts each row after its queue job is
-armed, and final `sent`/`failed` worker transitions upsert the same document id.
-An indexing outage is logged but never rolls back the Postgres delivery record.
+```http
+GET /api/emails/search?q=hello
+```
 
-The first write creates the `reachinbox-emails` mapping (keywords for ids,
-addresses and status; text for subject/error; dates for timestamps). Set
-`ELASTICSEARCH_URL` in `backend/.env`; hosted URLs containing `user:password@`
-are converted into HTTP Basic authentication safely. A live configured-cluster
-probe indexed and returned real results through this endpoint on 2026-09-02.
+### Health
 
-### Conventions worth knowing
+```http
+GET /health
+```
 
-- **Backend is ESM.** Relative imports carry an explicit `.js` extension even in
-  `.ts` files (`NodeNext`), so compiled output runs under plain `node dist/`.
-- **Errors have one shape.** Every failure returns
-  `{ error: { code, message, requestId } }`, built by
-  `backend/src/middleware/error-handler.ts` and mirrored in
-  `frontend/types/api.ts`. If one changes, change both in the same commit.
-- **Every response carries `x-request-id`**, honouring an inbound one if present,
-  so a browser error can be traced to a log line.
-- **Connections are lazy.** Importing a module never opens a socket, which is why
-  the test suite runs with the datastores down.
-- **Timestamps are `timestamptz`, everywhere, in and out.** `start_time` must carry
-  a timezone offset or it is a 400 — a scheduler that guesses at zoneless input
-  sends at the wrong hour.
-- **A BullMQ job id is the row id it sends.** That is what makes re-enqueueing a
-  lost job idempotent, and `bullmq_job_id IS NULL` the marker for "written but not
-  armed".
+### Readiness
 
-## Scripts
+```http
+GET /health/ready
+```
 
-Run from the repo root; each delegates into the workspaces.
+## Assignment Coverage
 
-| Command                                       | Does                                                                 |
-| --------------------------------------------- | -------------------------------------------------------------------- |
-| `npm run build`                               | `tsc` the backend, `next build` the frontend                         |
-| `npm run typecheck`                           | `tsc --noEmit` in both workspaces                                    |
-| `npm run lint`                                | ESLint in both workspaces                                            |
-| `npm test`                                    | Vitest (backend) — passes with the datastores down                   |
-| `npm run format`                              | Prettier write across the repo                                       |
-| `npm run db:up` / `:down`                     | _Optional local Docker:_ start / stop Postgres + Redis               |
-| `npm run db:reset`                            | _Optional local Docker:_ **destroys** the volumes and recreates them |
-| `npm run db:logs`                             | _Optional local Docker:_ tail container logs                         |
-| `npm run prisma:migrate`                      | `prisma migrate dev` (creates a new migration)                       |
-| `npm run prisma:deploy`                       | `prisma migrate deploy` (applies committed ones)                     |
-| `npm run prisma:studio`                       | Prisma Studio                                                        |
-| `npm run sender:create -- --email … --name …` | Register a sender (there is no endpoint for this, on purpose)        |
+| Requirement           | Implementation                       |
+| --------------------- | ------------------------------------ |
+| Email scheduling      | BullMQ delayed jobs                  |
+| Persistent scheduling | PostgreSQL + Redis                   |
+| No cron               | BullMQ delayed jobs                  |
+| Multiple recipients   | Batch scheduling                     |
+| Sending delay         | Configurable per batch               |
+| Hourly sending limit  | Redis-backed rolling limit           |
+| Worker concurrency    | Configurable `WORKER_CONCURRENCY`    |
+| Restart safety        | Persistent BullMQ jobs               |
+| Idempotency           | Scheduled email ID as BullMQ job ID  |
+| Email delivery        | Nodemailer + Ethereal                |
+| Scheduled dashboard   | Next.js                              |
+| Sent dashboard        | Next.js                              |
+| Google OAuth          | Auth.js + Google                     |
+| Queue visibility      | Live BullMQ dashboard                |
+| Email search          | Elasticsearch/OpenSearch projection  |
+| Slack integration     | OAuth-based rate-limit notifications |
 
-## Known gaps
+## Testing
 
-These are known trade-offs or final verification items, not hidden omissions.
+Run the test suite:
 
-- **API auth is not yet coupled to the Google dashboard session.** Google OAuth
-  protects the web app, but direct `/api/*` requests remain trusted-local only.
-  Do not expose port 4000 publicly until backend session/token verification lands.
-- **External-notification evidence is pending.** Slack OAuth is installed and SMTP
-  credentials are configured, but an intentional test Slack message and Ethereal
-  delivery still require explicit user approval because they communicate externally.
-- **No automated integration tests against the live datastores.** The migration is
-  applied to Neon and connectivity is verified by hand (a pooled query through the
-  node-postgres adapter and an Upstash TLS `PING`), but the test suite still mocks
-  Prisma and BullMQ — it proves the queries are _built_ correctly, not that they
-  _run_. An integration suite against a live Postgres and Redis is the missing half.
-- **`docker-compose.yml` is optional and unrun.** It is kept as a local-Docker
-  fallback, but the default path uses hosted Neon + Upstash (Docker could not run on
-  this machine), so the compose file has still never been executed. Not a blocker —
-  nothing in the default setup touches it.
-- **No cancel, reschedule, or detail endpoint**, and no reconciliation sweep for
-  rows left with `bullmq_job_id IS NULL`.
-- **Cancellation, rescheduling, sender management, and search UI** are omitted;
-  the required schedule/list/search API behaviour is present.
-- **ESLint is pinned to 9.x**, not 10. `eslint-config-next` still depends on
-  `eslint-plugin-react` 7.37, which calls APIs ESLint 10 removed.
-- **No CI, no Dockerfile for the app itself, no rate limiting on the HTTP layer.**
+```bash
+npm test
+```
 
-## Demo runbook
+Run TypeScript checks:
 
-Use this order for the five-minute submission recording:
+```bash
+npm run typecheck
+```
 
-1. Start the API, worker and frontend with `npm run dev:all`, then sign in at
-   `http://localhost:3000` with Google.
-2. Use **Compose new email** to paste or upload recipients, schedule a short
-   Ethereal batch, and show Scheduled then Sent rows.
-3. Open `http://localhost:4000/admin/queues` to show live BullMQ counts.
-4. For restart proof, schedule a send 30 seconds ahead, stop the worker before
-   its due time, wait past it, restart the worker, and show its single Sent row.
-5. Search its unique subject with `GET /api/emails/search?q=<subject-fragment>`.
-   The search result shows the same final status as Postgres.
-6. To connect Slack for a sender, open
-   `http://localhost:4000/api/integrations/slack/connect?sender=<sender-id>`;
-   choose a channel in Slack. A real rate-limit hit sends a notification while
-   returning the job to BullMQ's delayed queue.
+Run linting:
 
-### Verified evidence on 2026-09-02
+```bash
+npm run lint
+```
 
-- Slack OAuth callback persisted one integration for the demo sender; one live
-  test rate-limit notification was dispatched successfully.
-- An Ethereal end-to-end send was accepted, stored as `sent`, and indexed with
-  its final status in OpenSearch.
-- A future delayed job survived a worker stop/restart: it was delivered once
-  after the restarted worker recovered the overdue BullMQ job.
+Build the application:
+
+```bash
+npm run build
+```
+
+## Security Notes
+
+This project is intended for the hiring-assignment/demo environment.
+
+Never commit:
+
+* `.env`
+* `.env.local`
+* OAuth secrets
+* SMTP credentials
+* Database passwords
+* Redis credentials
+
+The backend API currently relies on local trusted access rather than coupling every `/api/*` request to the Google dashboard session. Do not expose the backend publicly without adding appropriate API authentication.
