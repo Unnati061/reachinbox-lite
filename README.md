@@ -2,12 +2,12 @@
 
 Schedule email campaigns and watch them send.
 
-> **Status: data model and API skeleton (phase 2).** The schema, the scheduling
-> endpoints, validation and the scheduling math are written, typechecked, linted
-> and unit-tested, and the schema is **now migrated onto a live hosted Postgres
-> (Neon)** — the app's pooled connection and the Redis (Upstash) connection are
-> both verified against the running services. But **nothing sends email** — the
-> worker is still a stub — and there is no auth. See
+> **Status: final verification and release evidence (phase 5).** The scheduler,
+> live dashboard, Google OAuth, SMTP worker, Redis-backed throttles, Slack OAuth,
+> and OpenSearch-compatible search projection are implemented. Live datastore,
+> Slack-installation, and Elasticsearch API checks have passed. The remaining
+> evidence is a deliberately triggered Ethereal delivery and Slack rate-limit
+> notification, plus a recorded restart/load demo. See
 > [Known gaps](#known-gaps); design decisions are logged in
 > [DECISIONS.md](./DECISIONS.md).
 
@@ -210,28 +210,43 @@ only if you run `npm run db:up` (see
 
 ### `backend/.env` — consumed by the API and the worker
 
-| Variable        | Required | Default                 | Notes                                                                                                                    |
-| --------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `NODE_ENV`      | no       | `development`           | `development` \| `test` \| `production`                                                                                  |
-| `PORT`          | no       | `4000`                  |                                                                                                                          |
-| `LOG_LEVEL`     | no       | `info`                  | pino levels, plus `silent`                                                                                               |
-| `DATABASE_URL`  | **yes**  | —                       | Neon **pooled** URL (host has `-pooler`); app runtime. Must start `postgresql://`                                        |
-| `DIRECT_URL`    | migrate  | —                       | Neon **unpooled** URL (no `-pooler`); used by Prisma Migrate only. Falls back to `DATABASE_URL`; not read at app runtime |
-| `REDIS_URL`     | **yes**  | —                       | Upstash TLS URL. Must start `redis://` or `rediss://`                                                                    |
-| `CORS_ORIGIN`   | no       | `http://localhost:3000` | Comma-separated list of allowed origins                                                                                  |
-| `SMTP_HOST`     | no       | —                       | Optional now; required in the sending phase                                                                              |
-| `SMTP_PORT`     | no       | —                       |                                                                                                                          |
-| `SMTP_USER`     | no       | —                       |                                                                                                                          |
-| `SMTP_PASSWORD` | no       | —                       |                                                                                                                          |
-| `MAIL_FROM`     | no       | —                       |                                                                                                                          |
+| Variable                         | Required | Default                 | Notes                                                                                                                    |
+| -------------------------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `NODE_ENV`                       | no       | `development`           | `development` \| `test` \| `production`                                                                                  |
+| `PORT`                           | no       | `4000`                  |                                                                                                                          |
+| `LOG_LEVEL`                      | no       | `info`                  | pino levels, plus `silent`                                                                                               |
+| `DATABASE_URL`                   | **yes**  | —                       | Neon **pooled** URL (host has `-pooler`); app runtime. Must start `postgresql://`                                        |
+| `DIRECT_URL`                     | migrate  | —                       | Neon **unpooled** URL (no `-pooler`); used by Prisma Migrate only. Falls back to `DATABASE_URL`; not read at app runtime |
+| `REDIS_URL`                      | **yes**  | —                       | Upstash TLS URL. Must start `redis://` or `rediss://`                                                                    |
+| `CORS_ORIGIN`                    | no       | `http://localhost:3000` | Comma-separated list of allowed origins                                                                                  |
+| `SMTP_HOST`                      | no       | —                       | Optional now; required in the sending phase                                                                              |
+| `SMTP_PORT`                      | no       | —                       |                                                                                                                          |
+| `SMTP_USER`                      | no       | —                       |                                                                                                                          |
+| `SMTP_PASSWORD`                  | no       | —                       |                                                                                                                          |
+| `MAIL_FROM`                      | no       | —                       |                                                                                                                          |
+| `WORKER_CONCURRENCY`             | no       | `5`                     | Parallel jobs in one worker process; safe because rate state is Redis-backed                                             |
+| `MIN_SEND_INTERVAL_MS`           | no       | `2000`                  | Redis-backed global minimum gap between SMTP attempts; use `0` only to disable this gap                                  |
+| `MAX_EMAILS_PER_HOUR_PER_SENDER` | no       | `200`                   | Rolling one-hour cap per registered sender, enforced by every worker instance                                            |
 
 ### `frontend/.env.local`
 
-| Variable                   | Required | Default                 | Notes                                        |
-| -------------------------- | -------- | ----------------------- | -------------------------------------------- |
-| `NEXT_PUBLIC_API_BASE_URL` | yes      | `http://localhost:4000` | Inlined into the browser bundle — no secrets |
+| Variable                   | Required | Default                 | Notes                                         |
+| -------------------------- | -------- | ----------------------- | --------------------------------------------- |
+| `NEXT_PUBLIC_API_BASE_URL` | yes      | `http://localhost:4000` | Inlined into the browser bundle — no secrets  |
+| `GOOGLE_CLIENT_ID`         | **yes**  | —                       | Google OAuth web-client id; server only       |
+| `GOOGLE_CLIENT_SECRET`     | **yes**  | —                       | Google OAuth secret; server only              |
+| `AUTH_SECRET`              | **yes**  | —                       | Long random key used to sign Auth.js sessions |
 
-<!-- PLACEHOLDER: add auth/session and provider credentials here when they land. -->
+In Google Cloud Console, register this development redirect URI exactly:
+
+```text
+http://localhost:3000/api/auth/callback/google
+```
+
+The dashboard redirects to `/login` when no session exists. Google returns the
+authenticated user to the dashboard, where their name, email and avatar appear
+in the header. Use **Logout** to clear the local Auth.js session. None of the
+three OAuth values may use the `NEXT_PUBLIC_` prefix.
 
 ## Architecture
 
@@ -248,6 +263,29 @@ a send; the worker is the only thing that talks to SMTP. That split is what make
 "schedule for later" survive an API restart — the delay lives in Redis, not in a
 `setTimeout`.
 
+### Delivery controls
+
+The scheduling API spaces a single batch for good UX, but that alone cannot
+protect a sender when several batches or workers overlap. The worker therefore
+uses two Redis-backed controls at dispatch time:
+
+- BullMQ's queue limiter guarantees `MIN_SEND_INTERVAL_MS` between SMTP attempts
+  across all worker processes.
+- A Lua-scripted sorted-set reservation tracks each sender's attempts in a
+  rolling hour. Its trim, count and reserve operations are one Redis transaction,
+  so two workers cannot both take the final allowed slot. A job at the cap is
+  moved back into BullMQ's delayed state at the earliest release time without
+  changing its id or consuming a retry.
+
+Attempts are counted rather than only accepted messages: an SMTP provider can
+throttle connection and rejected-recipient attempts too, and allowing retries to
+escape the cap would create precisely the burst this safeguard exists to avoid.
+The trade-off is conservative capacity after transient SMTP failures.
+
+Open `http://localhost:4000/admin/queues` while the API is running for a small
+live BullMQ dashboard. It polls queue counts every two seconds and is deliberately
+separate from the Next app so the queue is observable if the frontend is down.
+
 ### Layout
 
 ```
@@ -261,7 +299,7 @@ backend/
   src/schemas/              zod request schemas (the only input trust boundary)
   src/scripts/              one-off CLIs (create-sender)
   src/services/             business logic, framework-free
-  src/workers/              BullMQ worker + its own process entrypoint (still a stub)
+  src/workers/              BullMQ worker + its own process entrypoint
   tests/                    Vitest; runs green with Postgres and Redis down
 frontend/
   app/                      App Router pages + Tailwind entry (globals.css)
@@ -288,6 +326,20 @@ delayMs(i)      = max(0, scheduledAt(i) - now)       // relative, handed to Bull
 every limit that does not divide 3 600 000 evenly. One `now` sample for the whole
 batch, so a slow loop cannot drift the spacing. DECISIONS.md works through the
 `hourly_limit = 7` case in full.
+
+### Search
+
+`GET /api/emails/search?q=<term>` searches recipient email, sender email,
+subject and status, returning at most 50 records. Elasticsearch/OpenSearch is a
+rebuildable read projection: scheduling upserts each row after its queue job is
+armed, and final `sent`/`failed` worker transitions upsert the same document id.
+An indexing outage is logged but never rolls back the Postgres delivery record.
+
+The first write creates the `reachinbox-emails` mapping (keywords for ids,
+addresses and status; text for subject/error; dates for timestamps). Set
+`ELASTICSEARCH_URL` in `backend/.env`; hosted URLs containing `user:password@`
+are converted into HTTP Basic authentication safely. A live configured-cluster
+probe indexed and returned real results through this endpoint on 2026-09-02.
 
 ### Conventions worth knowing
 
@@ -329,15 +381,14 @@ Run from the repo root; each delegates into the workspaces.
 
 ## Known gaps
 
-These are deliberate, not oversights — each is scheduled for a later phase.
+These are known trade-offs or final verification items, not hidden omissions.
 
-- **No authentication.** `/api/emails/*` lets any caller that can reach the port
-  send as any registered sender and read every recipient address, subject and error
-  in the database. Localhost binding and `CORS_ORIGIN` limit browsers, not `curl`.
-  This must land before the API is reachable from anywhere else.
-- **Nothing sends.** The worker still throws `NotImplementedError`, so jobs enqueue
-  and sit. A no-op processor would mark sends complete with no email leaving, which
-  is silent data loss. No SMTP credentials are configured either.
+- **API auth is not yet coupled to the Google dashboard session.** Google OAuth
+  protects the web app, but direct `/api/*` requests remain trusted-local only.
+  Do not expose port 4000 publicly until backend session/token verification lands.
+- **External-notification evidence is pending.** Slack OAuth is installed and SMTP
+  credentials are configured, but an intentional test Slack message and Ethereal
+  delivery still require explicit user approval because they communicate externally.
 - **No automated integration tests against the live datastores.** The migration is
   applied to Neon and connectivity is verified by hand (a pooled query through the
   node-postgres adapter and an Upstash TLS `PING`), but the test suite still mocks
@@ -349,10 +400,35 @@ These are deliberate, not oversights — each is scheduled for a later phase.
   nothing in the default setup touches it.
 - **No cancel, reschedule, or detail endpoint**, and no reconciliation sweep for
   rows left with `bullmq_job_id IS NULL`.
-- **`hourly_limit` is enforced at schedule time only**, by spacing. Nothing enforces
-  it at send time across processes.
-- **The frontend has no UI for any of this yet** — `lib/api.ts` still only calls the
-  health endpoints.
+- **Cancellation, rescheduling, sender management, and search UI** are omitted;
+  the required schedule/list/search API behaviour is present.
 - **ESLint is pinned to 9.x**, not 10. `eslint-config-next` still depends on
   `eslint-plugin-react` 7.37, which calls APIs ESLint 10 removed.
 - **No CI, no Dockerfile for the app itself, no rate limiting on the HTTP layer.**
+
+## Demo runbook
+
+Use this order for the five-minute submission recording:
+
+1. Start the API, worker and frontend with `npm run dev:all`, then sign in at
+   `http://localhost:3000` with Google.
+2. Use **Compose new email** to paste or upload recipients, schedule a short
+   Ethereal batch, and show Scheduled then Sent rows.
+3. Open `http://localhost:4000/admin/queues` to show live BullMQ counts.
+4. For restart proof, schedule a send 30 seconds ahead, stop the worker before
+   its due time, wait past it, restart the worker, and show its single Sent row.
+5. Search its unique subject with `GET /api/emails/search?q=<subject-fragment>`.
+   The search result shows the same final status as Postgres.
+6. To connect Slack for a sender, open
+   `http://localhost:4000/api/integrations/slack/connect?sender=<sender-id>`;
+   choose a channel in Slack. A real rate-limit hit sends a notification while
+   returning the job to BullMQ's delayed queue.
+
+### Verified evidence on 2026-09-02
+
+- Slack OAuth callback persisted one integration for the demo sender; one live
+  test rate-limit notification was dispatched successfully.
+- An Ethereal end-to-end send was accepted, stored as `sent`, and indexed with
+  its final status in OpenSearch.
+- A future delayed job survived a worker stop/restart: it was delivered once
+  after the restarted worker recovered the overdue BullMQ job.

@@ -19,6 +19,7 @@ import { HttpError } from '../errors.js';
 import { logger } from '../logger.js';
 import type { ListQuery, ScheduleEmailsBody, SenderReference } from '../schemas/email.schemas.js';
 import { EMAIL_DISPATCH_JOB_NAME, getEmailDispatchQueue } from './queue.service.js';
+import { indexEmail } from './email-search.service.js';
 import { SchedulePlanError, planSchedule } from './schedule-planner.js';
 
 /** What GET /api/emails/scheduled means: not yet resolved, one way or the other. */
@@ -218,6 +219,11 @@ export async function scheduleEmails(body: ScheduleEmailsBody): Promise<Schedule
     logger.warn({ err: error, batchId }, 'Jobs enqueued but bullmq_job_id was not recorded');
   }
 
+  // Search is a rebuildable projection, not part of the scheduling transaction.
+  // Index after the queue is armed; failure is observed/logged inside indexEmail
+  // but cannot turn a durable schedule into an HTTP error.
+  await Promise.all(created.map((row) => indexEmail(row, sender)));
+
   return {
     sender,
     batchId,
@@ -231,6 +237,8 @@ export async function scheduleEmails(body: ScheduleEmailsBody): Promise<Schedule
     emails: created,
   };
 }
+
+export { searchEmails } from './email-search.service.js';
 
 /**
  * One page of emails in the given states.
@@ -247,7 +255,11 @@ async function listByStatus(
 ): Promise<PagedEmails> {
   const where: Prisma.ScheduledEmailWhereInput = { status: { in: [...statuses] } };
 
-  const [total, rows] = await prisma.$transaction([
+  // These are independent read-only queries. A Prisma array transaction can
+  // fail to acquire a session through Neon/PgBouncer's transaction pool under
+  // load (P2028), while it never supplied a shared snapshot at READ COMMITTED
+  // anyway. Parallel queries retain the documented small count/list drift.
+  const [total, rows] = await Promise.all([
     prisma.scheduledEmail.count({ where }),
     prisma.scheduledEmail.findMany({
       where,

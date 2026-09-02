@@ -5,4 +5,8 @@ export type {
   DependencyStatus,
   HealthResponse,
   ReadinessResponse,
+  EmailStatus,
+  PaginatedResponse,
+  ScheduleBatchResponse,
+  ScheduledEmailListItem,
 } from './api';

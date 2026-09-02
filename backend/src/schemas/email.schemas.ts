@@ -102,11 +102,7 @@ export type SenderReference = z.output<typeof senderReference>;
 export const scheduleEmailsBodySchema = z
   .strictObject({
     sender: senderReference,
-    subject: z
-      .string()
-      .trim()
-      .min(1, { error: 'subject cannot be empty' })
-      .max(MAX_SUBJECT_LENGTH),
+    subject: z.string().trim().min(1, { error: 'subject cannot be empty' }).max(MAX_SUBJECT_LENGTH),
     body: z
       .string()
       .min(1, { error: 'body cannot be empty' })
@@ -144,3 +140,8 @@ export const listQuerySchema = z.object({
 });
 
 export type ListQuery = z.output<typeof listQuerySchema>;
+
+/** Deliberately small query surface: search is lexical, not a query DSL proxy. */
+export const emailSearchQuerySchema = z.object({
+  q: z.string().trim().min(1, { error: 'q is required' }).max(200),
+});

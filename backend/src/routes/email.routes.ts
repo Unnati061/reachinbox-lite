@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import {
   listQuerySchema,
+  emailSearchQuerySchema,
   scheduleEmailsBodySchema,
 } from '../schemas/email.schemas.js';
 import {
   listScheduledEmails,
   listSentEmails,
   scheduleEmails,
+  searchEmails,
 } from '../services/email.service.js';
 import {
   paginationMeta,
@@ -79,4 +81,10 @@ emailRouter.get('/sent', async (req, res) => {
   };
 
   res.json(payload);
+});
+
+/** GET /api/emails/search?q= — Elasticsearch read model, maximum 50 hits. */
+emailRouter.get('/search', async (req, res) => {
+  const { q } = emailSearchQuerySchema.parse(req.query);
+  res.json({ data: await searchEmails(q) });
 });

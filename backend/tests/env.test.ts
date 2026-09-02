@@ -16,6 +16,11 @@ describe('loadEnv', () => {
     expect(config.http.corsOrigins).toEqual(['http://localhost:3000']);
     expect(config.isDevelopment).toBe(true);
     expect(config.isProduction).toBe(false);
+    expect(config.delivery).toEqual({
+      workerConcurrency: 5,
+      minSendIntervalMs: 2_000,
+      maxEmailsPerHourPerSender: 200,
+    });
   });
 
   it('reports every missing variable in one throw', () => {
@@ -84,5 +89,22 @@ describe('loadEnv', () => {
 
     expect(config.mail.isConfigured).toBe(true);
     expect(config.mail.port).toBe(587);
+  });
+
+  it('reads delivery limits from configuration and rejects invalid values', () => {
+    const config = loadEnv({
+      ...validEnv,
+      WORKER_CONCURRENCY: '12',
+      MIN_SEND_INTERVAL_MS: '0',
+      MAX_EMAILS_PER_HOUR_PER_SENDER: '75',
+    });
+    expect(config.delivery).toEqual({
+      workerConcurrency: 12,
+      minSendIntervalMs: 0,
+      maxEmailsPerHourPerSender: 75,
+    });
+    expect(() => loadEnv({ ...validEnv, MAX_EMAILS_PER_HOUR_PER_SENDER: '0' })).toThrow(
+      EnvValidationError,
+    );
   });
 });

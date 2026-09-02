@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { emailRouter } from './email.routes.js';
 import { healthRouter } from './health.routes.js';
+import { queueRouter } from './queue.routes.js';
+import { slackRouter } from './slack.routes.js';
 
 /**
  * Base path for domain endpoints.
@@ -24,6 +26,8 @@ export function createRouter(): Router {
 
   router.use('/health', healthRouter);
   router.use(`${API_BASE}/emails`, emailRouter);
+  router.use('/admin/queues', queueRouter);
+  router.use(`${API_BASE}/integrations/slack`, slackRouter);
 
   return router;
 }

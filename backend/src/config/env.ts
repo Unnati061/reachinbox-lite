@@ -22,6 +22,8 @@ const optionalPort = z.preprocess(
   blankToUndefined,
   z.coerce.number().int().min(1).max(65_535).optional(),
 );
+const positiveInteger = (fallback: number) => z.coerce.number().int().min(1).default(fallback);
+const nonNegativeInteger = (fallback: number) => z.coerce.number().int().min(0).default(fallback);
 
 export const envSchema = z.object({
   NODE_ENV: z.enum(NODE_ENVS).default('development'),
@@ -47,6 +49,23 @@ export const envSchema = z.object({
   SMTP_USER: optionalString,
   SMTP_PASSWORD: optionalString,
   MAIL_FROM: optionalString,
+  /** Optional so a developer can run the core scheduler without search. */
+  ELASTICSEARCH_URL: z.preprocess(
+    blankToUndefined,
+    z.string().url('must be a valid Elasticsearch URL').optional(),
+  ),
+  SLACK_CLIENT_ID: optionalString,
+  SLACK_CLIENT_SECRET: optionalString,
+  SLACK_REDIRECT_URI: z.preprocess(
+    blankToUndefined,
+    z.string().url().default('http://localhost:4000/api/integrations/slack/callback'),
+  ),
+
+  // Delivery controls live in configuration, not code. They apply to every
+  // worker process that shares this application's Redis instance.
+  WORKER_CONCURRENCY: positiveInteger(5),
+  MIN_SEND_INTERVAL_MS: nonNegativeInteger(2_000),
+  MAX_EMAILS_PER_HOUR_PER_SENDER: positiveInteger(200),
 });
 
 export interface AppConfig {
@@ -68,6 +87,18 @@ export interface AppConfig {
     readonly user: string | undefined;
     readonly password: string | undefined;
     readonly from: string | undefined;
+  };
+  readonly search: { readonly elasticsearchUrl: string | undefined };
+  readonly slack: {
+    readonly isConfigured: boolean;
+    readonly clientId: string | undefined;
+    readonly clientSecret: string | undefined;
+    readonly redirectUri: string;
+  };
+  readonly delivery: {
+    readonly workerConcurrency: number;
+    readonly minSendIntervalMs: number;
+    readonly maxEmailsPerHourPerSender: number;
   };
 }
 
@@ -149,6 +180,18 @@ export function loadEnv(source: NodeJS.ProcessEnv): AppConfig {
       user: env.SMTP_USER,
       password: env.SMTP_PASSWORD,
       from: env.MAIL_FROM,
+    },
+    search: { elasticsearchUrl: env.ELASTICSEARCH_URL },
+    slack: {
+      isConfigured: env.SLACK_CLIENT_ID !== undefined && env.SLACK_CLIENT_SECRET !== undefined,
+      clientId: env.SLACK_CLIENT_ID,
+      clientSecret: env.SLACK_CLIENT_SECRET,
+      redirectUri: env.SLACK_REDIRECT_URI,
+    },
+    delivery: {
+      workerConcurrency: env.WORKER_CONCURRENCY,
+      minSendIntervalMs: env.MIN_SEND_INTERVAL_MS,
+      maxEmailsPerHourPerSender: env.MAX_EMAILS_PER_HOUR_PER_SENDER,
     },
   };
 }

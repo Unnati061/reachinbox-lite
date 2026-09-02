@@ -56,8 +56,27 @@ model Sender {
 
   batches         ScheduleBatch[]
   scheduledEmails ScheduledEmail[]
+  slackIntegration SlackIntegration?
 
   @@map("senders")
+}
+
+/// One Slack installation per sending identity. The webhook comes from Slack's
+/// incoming-webhook OAuth grant and is used only for rate-limit notifications.
+model SlackIntegration {
+  id         String   @id @default(uuid(4)) @db.Uuid
+  senderId   String   @unique @map("sender_id") @db.Uuid
+  teamId     String   @map("team_id")
+  teamName   String?  @map("team_name")
+  channelId  String   @map("channel_id")
+  channelName String? @map("channel_name")
+  webhookUrl String   @map("webhook_url")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  sender Sender @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@map("slack_integrations")
 }
 
 /// One POST /api/emails/schedule request.

@@ -989,3 +989,221 @@ The real Neon and Upstash credentials the pivot introduced live only in gitignor
 `backend/.env`. `.env.example` carries placeholders (`USER:PASSWORD@ep-xxxx-pooler...`).
 `git check-ignore` was confirmed to cover `backend/.env` before committing. No real
 secret is in any tracked file.
+
+## 2026-09-02 — Delivery plan and audit checkpoint
+
+### Five delivery phases, with a percentage after every completed phase
+
+**Chose** five independently demonstrable phases **over** treating the assignment
+as one large implementation task. The assignment has several cross-cutting
+requirements (persistent jobs, live delivery, OAuth, search, and a design-led
+dashboard); a feature can look finished while a dependency still makes it
+undemonstrable. The phase boundaries are therefore also demo boundaries:
+
+1. **Foundation — 20%:** monorepo, local/hosted service configuration, typed
+   API/web scaffolds, schema tooling, health checks.
+2. **Persistent scheduler API — 40%:** relational model, validation, scheduling
+   plan, durable write-before-enqueue flow, list endpoints and unit tests.
+3. **Delivery controls — 60%:** SMTP worker, configurable concurrency and
+   throttling, cross-instance sender rate limits, retry/idempotency behaviour,
+   real queue dashboard and an end-to-end Ethereal check.
+4. **Dashboard — 80%:** Google sign-in integration, compose/upload flow, and
+   scheduled/sent views that match the supplied Figma reference.
+5. **Integrations and release evidence — 100%:** Slack OAuth notification,
+   Elasticsearch indexing/search, load/restart evidence, documentation and demo
+   runbook.
+
+Percentages describe assignment coverage, not lines of code. A phase is only
+called complete after its checks run, with an explicitly named exception for a
+credential-owned integration that cannot be exercised without its credentials.
+
+### Existing uncommitted changes are preserved and audited
+
+**Chose** to regard the existing dirty working tree as user work **over**
+resetting, recreating, or silently claiming it. The user said work already
+existed, and the worker and mailer changes are coherent Phase 3 work. They were
+checked rather than overwritten: backend typecheck and lint pass; `vitest run
+--reporter=verbose` passes all 65 tests; and the production backend/frontend
+build passes. Their current limits remain part of the Phase 3 scope: worker
+concurrency is still a hard-coded constant, there is no worker-enforced shared
+rate limiter or Bull Board UI, and no live Ethereal delivery has been verified.
+
+### Documentation tracks observed state, not aspirational state
+
+**Chose** to correct status documentation before extending the system **over**
+leaving a known-stale README claim in place. The earlier README says the worker
+is a stub, but the repository now contains an implemented SMTP worker and unit
+tests for it. Documentation must say what the checkout does today and label
+unverified behaviour precisely, otherwise it is worse than no documentation in
+an interview demo.
+
+## 2026-09-02 — Phase 3: delivery controls
+
+### Two complementary Redis-backed throttles
+
+**Chose** BullMQ's queue limiter plus a custom Redis Lua sender limiter **over**
+an in-memory counter or schedule-time spacing alone. The BullMQ limiter supplies
+a configurable global minimum gap between SMTP attempts across all worker
+instances. The Lua script stores a rolling one-hour sorted set per sender and
+atomically trims expired entries, counts current entries, and reserves a slot;
+this prevents concurrent workers from both taking the final slot. Schedule-time
+spacing remains useful for a predictable initial plan, but cannot account for
+overlapping batches or a second worker process.
+
+When a sender is full, the worker moves the same BullMQ job back to delayed state
+at the oldest reservation's expiry and throws `DelayedError`. This preserves the
+job id and retry budget; it is a deferral, not a failed delivery. Exact global
+ordering cannot be guaranteed when workers race, but BullMQ's time order plus
+the earliest-release retry preserves it as closely as a distributed queue can.
+
+### Count provider attempts, not only accepted messages
+
+**Chose** to reserve a rate-limit slot before SMTP **over** incrementing a
+counter only after a successful SMTP response. Providers often rate-limit the
+connection/recipient attempt itself, and a retry storm must not evade the limit.
+The cost is deliberately conservative: a transient SMTP failure consumes a
+slot. A future provider with an authoritative quota API can replace the
+reservation policy, but the current policy is safer for a generic SMTP service.
+
+### A dependency-free queue dashboard
+
+**Chose** a small built-in live inspector at `/admin/queues` **over** adding a
+second dashboard dependency and server. It reads BullMQ's own job counts through
+the existing queue connection and polls every two seconds. This keeps the API
+process and deployment topology simple while the application has no
+authentication; Phase 5 must put the route behind the same authenticated admin
+boundary as the rest of the dashboard before exposure beyond local development.
+
+### Phase 3 verification state
+
+The backend typecheck and lint pass; the test suite now has 70 tests, including
+config validation, rate-limit script contract, and the worker's delayed-job path.
+The rate limiter uses real Redis semantics but remains unit-tested at this point;
+the live SMTP/Ethereal demonstration still needs user-owned Ethereal credentials.
+
+## 2026-09-02 — Phase 4: dashboard implementation
+
+### Server-rendered initial tables, client-owned interaction
+
+**Chose** server-side initial list requests plus a small client dashboard **over**
+an effect-driven initial fetch. The first render either contains the scheduled
+and sent rows or a clear API-unavailable message; there is no loading flash and
+the app can be inspected without JavaScript. Tabs, modal state, CSV/text file
+selection, validation, and post-schedule refresh live in the client component
+because they require browser APIs and user interaction. `router.refresh()`
+reuses the server load after a successful schedule rather than duplicating list
+state in the browser.
+
+### Parse email leads in the browser and let the API remain authoritative
+
+**Chose** a deliberately forgiving browser extractor **over** a CSV parser and
+a second submission format. A CSV is text; extracting address-shaped values
+from CSV or plain text handles headers, quoted columns and pasted lists without
+making a user map columns. It reports the unique count immediately for UX, but
+the backend Zod schema still validates and normalises every submitted address,
+so the browser is never a security boundary.
+
+### OAuth is not mocked
+
+Google OAuth was deliberately deferred until a real client id, client secret,
+and approved callback URL were supplied by the project owner. A fake profile
+would satisfy neither the brief nor a demo. Those credentials are now configured
+locally, so the dashboard is protected by the real flow below.
+
+### Auth.js with a Google OAuth provider
+
+**Chose** Auth.js (`next-auth`) with its Google provider **over** a hand-written
+OAuth callback or a mock session. It validates OAuth state, handles the callback,
+signs the session with `AUTH_SECRET`, and exposes the authenticated Google name,
+email and avatar in the header without placing the client secret in browser code.
+The root page checks the server session and redirects unauthenticated visitors to
+`/login`; the login page starts the real provider redirect and logout clears the
+session. `GOOGLE_CLIENT_SECRET` and `AUTH_SECRET` are server-only variables —
+they deliberately do not use the `NEXT_PUBLIC_` prefix.
+
+The local client is configured for
+`http://localhost:3000/api/auth/callback/google`. Before deployment, add the
+production URL to both Google Cloud's authorized origins and redirect URIs, and
+set `AUTH_URL` if the hosting platform cannot infer the external origin.
+
+## 2026-09-02 — Phase 5: Elasticsearch search projection
+
+### Postgres is the source of truth; Elasticsearch is an idempotent projection
+
+**Chose** a best-effort Elasticsearch/OpenSearch projection **over** making an
+Elasticsearch write part of the scheduling transaction. A search outage must not
+drop an email or undo a successfully armed BullMQ job. Scheduling indexes the
+committed rows after enqueue; worker terminal transitions (`sent` and `failed`)
+upsert the same id, so retries and duplicate events converge rather than creating
+duplicates. The trade-off is temporary stale search results during an outage;
+the delivery record in Postgres remains correct and can be reindexed later.
+
+### Explicit one-time index mapping
+
+**Chose** to create `reachinbox-emails` on first use with an explicit mapping
+**over** dynamic mapping. Email addresses, ids and status are keywords; subject
+and error are full-text; timestamps are dates. The initialise promise is shared
+within a process, while a `400 resource already exists` response makes an
+initialisation race between API instances harmless.
+
+### Hosted URL credentials become an Authorization header
+
+**Chose** to support `https://user:password@host` Elasticsearch URLs by
+converting user info into HTTP Basic authentication **over** passing the URL to
+Node fetch unchanged. Node deliberately rejects credentialed request URLs. This
+conversion supports the configured Bonsai/OpenSearch endpoint and keeps secrets
+out of error messages and request URLs.
+
+### Live verification, not compile-only
+
+On 2026-09-02, a unique `reachinbox-es-probe-*` document was successfully
+upserted into the configured cluster and immediately returned by a real search
+(`ES_PROBE_INDEXED=true`, two matching probe hits). An in-process request to
+`GET /api/emails/search?q=reachinbox-es-probe` returned HTTP 200, two records,
+and the expected recipient/subject fields. This validates the real configured
+OpenSearch-compatible endpoint and public API route, not just typechecking.
+
+## 2026-09-02 — Phase 5: Slack rate-limit notifications
+
+### Slack incoming-webhook OAuth per sender
+
+**Chose** Slack's `incoming-webhook` OAuth scope, plus `chat:write`, **over** a
+preconfigured channel id. The OAuth installer selects a Slack destination; its
+callback supplies the channel-specific webhook URL which is persisted per sender
+in `slack_integrations`. The callback state is a cryptographically random value
+stored in Redis for ten minutes and consumed with `GETDEL`, preventing callback
+replay and binding an installation to the sender chosen before redirect.
+
+The exact callback URL is
+`http://localhost:4000/api/integrations/slack/callback`. The worker does not
+wait for Slack: a rate-limit hit moves its BullMQ job to delayed state first,
+then sends the notification fire-and-forget. Absent, disconnected, or failed
+Slack integrations are logged but cannot crash delivery or lose the deferred job.
+
+### Slack installation verified; notification requires deliberate consent
+
+The OAuth callback completed successfully on 2026-09-02: one Slack integration
+row exists for sender `e5b33517-dd03-47e1-82f9-1f0226a49cea`. This confirms the
+state exchange, OAuth token grant, callback, and persistence path. A webhook
+post is intentionally not fired merely to prove installation because it creates
+an external message in the selected Slack channel; the final rate-limit
+notification demonstration will be sent only after the project owner explicitly
+authorizes that test message.
+
+### Final live delivery and restart evidence
+
+With owner authorization, one Slack rate-limit test notification was dispatched
+through the stored integration on 2026-09-02. A separate uniquely tagged
+Ethereal email was scheduled through the public API, accepted by SMTP, recorded
+as `sent` in Postgres, and returned by the real search endpoint with `sent`
+status. Its Ethereal preview URL was emitted in the worker log.
+
+Restart persistence was then demonstrated with a second uniquely tagged job:
+the worker was stopped before its future scheduled instant, time was allowed to
+pass, and a newly started worker delivered the overdue BullMQ job exactly once.
+This proves the scheduled delay is in Redis rather than in a worker timer. The
+test also exposed a Neon/PgBouncer limitation in the previous list implementation:
+Prisma's array transaction intermittently raised P2028 while acquiring a pooled
+transaction. The list code now uses parallel read-only count/find queries, which
+matches its existing documented READ COMMITTED drift trade-off and removes the
+unnecessary pooled-transaction dependency.

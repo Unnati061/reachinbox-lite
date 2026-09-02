@@ -1,4 +1,11 @@
-import type { ApiErrorBody, HealthResponse, ReadinessResponse } from '@/types/api';
+import type {
+  ApiErrorBody,
+  HealthResponse,
+  PaginatedResponse,
+  ReadinessResponse,
+  ScheduleBatchResponse,
+  ScheduledEmailListItem,
+} from '@/types/api';
 
 /**
  * Typed fetch client for the ReachInbox-lite API.
@@ -191,4 +198,21 @@ export const api = {
   health: (options?: RequestOptions) => request<HealthResponse>('GET', '/health', options),
   readiness: (options?: RequestOptions) =>
     request<ReadinessResponse>('GET', '/health/ready', { ...options, acceptStatuses: [503] }),
+  scheduled: (options?: RequestOptions) =>
+    request<PaginatedResponse<ScheduledEmailListItem>>(
+      'GET',
+      `${API_BASE}/emails/scheduled`,
+      options,
+    ),
+  sent: (options?: RequestOptions) =>
+    request<PaginatedResponse<ScheduledEmailListItem>>('GET', `${API_BASE}/emails/sent`, options),
+  schedule: (body: {
+    sender: string;
+    subject: string;
+    body: string;
+    recipients: string[];
+    start_time: string;
+    delay_between_emails_ms: number;
+    hourly_limit?: number;
+  }) => request<ScheduleBatchResponse>('POST', `${API_BASE}/emails/schedule`, { body }),
 } as const;

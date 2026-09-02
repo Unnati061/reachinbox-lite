@@ -9,6 +9,7 @@ import { config } from '../config/config.js';
 import { disconnectDatabase } from '../db/client.js';
 import { disconnectRedis } from '../db/redis.js';
 import { logger } from '../logger.js';
+import { closeMailer, verifyMailer } from '../services/mailer.js';
 import { QUEUE_NAMES } from '../services/queue.service.js';
 import { createEmailWorker, EMAIL_WORKER_CONCURRENCY } from './email.worker.js';
 
@@ -26,7 +27,21 @@ logger.info(
   'Worker started',
 );
 
-if (!config.mail.isConfigured) {
+if (config.mail.isConfigured) {
+  // Fire-and-forget: a bad SMTP config should surface loudly at startup, but it
+  // must not stop the worker booting — jobs will fail and retry, which is the
+  // same signal with a paper trail.
+  void verifyMailer()
+    .then(() => {
+      logger.info('SMTP transport verified');
+    })
+    .catch((error: unknown) => {
+      logger.error(
+        { err: error },
+        'SMTP verification failed — sends will fail until SMTP settings are corrected',
+      );
+    });
+} else {
   logger.warn('SMTP is not configured — dispatch jobs will fail until SMTP_HOST and MAIL_FROM are set');
 }
 
@@ -47,7 +62,10 @@ async function shutdown(reason: string, exitCode: number): Promise<void> {
 
   let code = exitCode;
   try {
+    // Stop accepting jobs and let in-flight sends finish before tearing down the
+    // connections they depend on.
     await worker.close();
+    closeMailer();
     await disconnectDatabase();
     await disconnectRedis();
     logger.info('Worker shutdown complete');
