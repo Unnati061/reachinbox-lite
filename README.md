@@ -502,4 +502,3 @@ Build the application:
 ```bash
 npm run build
 ```
-
